@@ -1,0 +1,38 @@
+enterprise:
+  featureGate:
+    approved:
+      - Multicast
+  multicast:
+    enabled: true
+
+cni:
+  exclusive: false
+
+ipam:
+  mode: "kubernetes"
+
+k8s:
+  requireIPv4PodCIDR: true
+  requireIPv6PodCIDR: false
+
+hubble:
+  enabled: true
+  relay:
+    enabled: true
+  ui:
+    enabled: true
+#  enabled: false
+
+#envoy:
+#  enabled: false
+  
+#operator:
+#  replicas: 1
+
+#debug:
+# enabled: true
+
+#encryption:
+# enabled: true
+
+#MTU: 9000

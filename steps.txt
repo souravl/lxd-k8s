@@ -1,0 +1,100 @@
+Add sudo where needed, it is expected user will give password
+
+1. ufw disable on host machine if present
+
+2. create /etc/modules-load.d/k8s.conf on host
+overlay
+br_netfilter
+nf_conntrack
+
+and also load these modules in the current host system
+
+3. create /etc/sysctl.d/99-k8s.conf on host
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+
+and also load it in current host system
+
+4. Install lxc "sudo apt-get update && sudo apt-get install lxc -y"
+5. Install lxd via snap 
+6, Make the current user member of lxd group; also makde sure that from here onwards in the script lxd/lxc does not need sudo
+7. do lxd init with lxd-init-config file
+8. run lxd_docker_iptables.sh
+
+9. create lxd profile "k8s" from k8s-profile-config
+
+10 launch 3 lxd containers node1, node2, node3
+(
+lxc launch ubuntu:24.04 node1 --profile k8s --config devices.eth0.ipv4.address=10.67.38.87
+same for node2 - 10.67.38.221
+same for node3 - 10.67.38.211
+lxc start node1
+lxc start node2
+lxc start node3
+)
+
+11. Run "setup_ssh_lxd_nodes.sh" for ssh setup
+
+13. for all 3 nodes do
+i) scp containerd_install.sh, kubeadm_install.sh
+ii) ssh to container
+iii) run the script containerd_install.sh (with sudo for appropriate commands)
+iv) then --> rm -rf /etc/containerd/config.toml; mkdir -p /etc/containerd; containerd config default | tee /etc/containerd/config.toml
+v) then in generated containerd config.toml, change:
+- SystemdCgroup = true
+- disabled_plugins = []
+vi)
+- sudo systemctl daemon-reload
+- sudo systemctl restart containerd
+vii) run kubeadm_install.sh
+viii) kubeadm config images pull - check which version of pause
+ix) change the sandbox in containerd config.toml to this version
+e.g.
+    sandbox = 'registry.k8s.io/pause:3.10.2'
+x)
+- sudo systemctl daemon-reload
+- sudo systemctl restart containerd
+
+14. for node1
+i) scp kube-vip.sh and kubeadm-init-config.yaml
+ii) run kube-vip.sh
+iii) # Match the line containing 'hostPath:', then replace 'admin.conf' on the next line
+sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+
+iv) run "kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification"
+
+v) Note the token, discovery-token-ca-cert-hash and certificate-key from the command output e.g.
+  kubeadm join 10.106.138.219:6443 --token qxyig7.aspq12rm9ow36kh7 \
+	--discovery-token-ca-cert-hash sha256:8cbe689c503eedb6b9ef3dd82e8330181312640906b1db5b87fa797f49e54025 \
+	--control-plane --certificate-key 99b54442bedf79a05f5af4463586eabb9a1f857932a9539dc37c439e7e71bccd
+
+vi) copy /etc/kubernetes/admin.conf to $HOME (as instructed by the command output)
+vii) check if api server is reachable and responds properly (like kubectl get nodes)
+viii) # Revert hostPath back to admin.conf safely
+sudo sed -i '/hostPath:/{n;s/super-admin.conf/admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+ix) move /etc/kubernetes/manifests/kube-vip.yaml to /tmp/
+x) check kube-vip pod is deleted
+xi) move back /tmp/kube-vip.yaml to /etc/kubernetes/manifests/
+xii) check kube-vip pod is created
+xiii) exit out of node1 back to host machine
+
+15. Copy the k8s config file from node1 to host, so that kubectl can be used from host machine
+
+16. update the kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with appropriate values noted in 14.v)
+17. for node2:
+i) scp  kubeadm-join-cp2-config.yaml (modified)
+ii) run "kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification"
+iii) copy /etc/kubernetes/admin.conf to $HOME (as instructed by the command output)
+iv) exit out of node2 back to host machine
+18. for node3:
+i) scp  kubeadm-join-cp3-config.yaml (modified)
+ii) run "kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification"
+iii) copy /etc/kubernetes/admin.conf to $HOME (as instructed by the command output)
+iv) exit out of node3 back to host machine
+19. copy node1 /etc/kubernetes/manifests/kube-vip.yaml to node2 and node3 path /etc/kubernetes/manifests/
+
+20. on host run cilium_cli_install.sh, helm_install.sh and kubectl_install.sh
+21. run "helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml"
+22. run "kubectl apply -f ./cilium.yaml"
+23. run cilium status --wait
