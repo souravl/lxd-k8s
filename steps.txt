@@ -95,6 +95,9 @@ iv) exit out of node3 back to host machine
 19. copy node1 /etc/kubernetes/manifests/kube-vip.yaml to node2 and node3 path /etc/kubernetes/manifests/
 
 20. on host run cilium_cli_install.sh, helm_install.sh and kubectl_install.sh
-21. run "helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml"
-22. run "kubectl apply -f ./cilium.yaml"
-23. run cilium status --wait
+21. wget https://helm.isovalent.com/cilium-1.18.13.tgz
+22. run "helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml"
+23. run "kubectl apply -f ./cilium.yaml"
+24. run cilium status --wait and wait for its successful completion. it may exit if installation takes long, reopen the command till it exits successfully
+25. check for all 3 modes status Ready
+26. kubectl apply -f dnsutils.yaml
