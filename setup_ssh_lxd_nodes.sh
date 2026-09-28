@@ -1,8 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# NODES=("kmaster" "kworker1" "kworker2")
-NODES=("node1" "node2" "node3")
+# Accept HOSTS_ENTRIES from command-line arguments, or fallback to default
+if [ "$#" -gt 0 ]; then
+    HOSTS_ENTRIES=("$@")
+elif [ -n "${HOSTS_ENTRIES_ENV:-}" ]; then
+    readarray -t HOSTS_ENTRIES <<< "$HOSTS_ENTRIES_ENV"
+else
+    HOSTS_ENTRIES=(
+        "10.67.38.87 node1"
+        "10.67.38.221 node2"
+        "10.67.38.211 node3"
+    )
+fi
+
+# Derive NODES list from HOSTS_ENTRIES
+NODES=()
+for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+    NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
+    NODES+=("$NODE_NAME")
+done
 
 # 1. Locate Host SSH Public Key
 SSH_PUB_KEY=""
@@ -51,20 +68,20 @@ for NODE in "${NODES[@]}"; do
     if [ "$STATE" != "RUNNING" ]; then
         echo "  -> Starting container $NODE..."
         lxc start "$NODE"
-
-        # Wait up to 30 seconds for DNS & network readiness
-        MAX_WAIT=30
-        COUNT=0
-        echo "  -> Waiting for DNS & network readiness (timeout: ${MAX_WAIT}s)..."
-        until lxc exec "$NODE" -- getent hosts archive.ubuntu.com >/dev/null 2>&1; do
-            COUNT=$((COUNT + 1))
-            if [ "$COUNT" -ge "$MAX_WAIT" ]; then
-                echo "  [!] Error: DNS/Network timeout on container '$NODE' after ${MAX_WAIT}s. Aborting." >&2
-                exit 1
-            fi
-            sleep 1
-        done
     fi
+
+    # Wait up to 30 seconds for DNS & network readiness
+    MAX_WAIT=30
+    COUNT=0
+    echo "  -> Waiting for DNS & network readiness (timeout: ${MAX_WAIT}s)..."
+    until lxc exec "$NODE" -- getent hosts archive.ubuntu.com >/dev/null 2>&1; do
+        COUNT=$((COUNT + 1))
+        if [ "$COUNT" -ge "$MAX_WAIT" ]; then
+            echo "  [!] Error: DNS/Network timeout on container '$NODE' after ${MAX_WAIT}s. Aborting." >&2
+            exit 1
+        fi
+        sleep 1
+    done
 
     # Create user '${USER}' if it doesn't exist
     if ! lxc exec "$NODE" -- id -u "${USER}" >/dev/null 2>&1; then
@@ -108,12 +125,6 @@ echo "Configuration complete!"
 # 4. Update /etc/hosts with static IP mappings
 echo "----------------------------------------"
 echo "[+] Updating /etc/hosts..."
-
-HOSTS_ENTRIES=(
-    "10.67.38.87 node1"
-    "10.67.38.221 node2"
-    "10.67.38.211 node3"
-)
 
 # Update host's /etc/hosts (requires sudo)
 echo "  -> Updating host /etc/hosts (sudo required)..."

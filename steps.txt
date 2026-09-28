@@ -1,103 +1,161 @@
-Add sudo where needed, it is expected user will give password
+# ==============================================================================
+# High-Availability Kubernetes Cluster on LXD - Step-by-Step Guide
+# Note: Add 'sudo' where needed. The user is expected to provide sudo password.
+# ==============================================================================
 
-1. ufw disable on host machine if present
+1. Disable UFW on host machine if present:
+   sudo ufw disable
 
-2. create /etc/modules-load.d/k8s.conf on host
-overlay
-br_netfilter
-nf_conntrack
+2. Configure kernel modules on host:
+   Create /etc/modules-load.d/k8s.conf containing:
+     overlay
+     br_netfilter
+     nf_conntrack
 
-and also load these modules in the current host system
+   And load these modules into the current host system:
+     sudo modprobe overlay
+     sudo modprobe br_netfilter
+     sudo modprobe nf_conntrack
 
-3. create /etc/sysctl.d/99-k8s.conf on host
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
+3. Configure sysctl settings on host:
+   Create /etc/sysctl.d/99-k8s.conf containing:
+     net.bridge.bridge-nf-call-iptables  = 1
+     net.bridge.bridge-nf-call-ip6tables = 1
+     net.ipv4.ip_forward                 = 1
 
-and also load it in current host system
+   And load settings into the current host system:
+     sudo sysctl --system
 
-4. Install lxc "sudo apt-get update && sudo apt-get install lxc -y"
-5. Install lxd via snap 
-6, Make the current user member of lxd group; also makde sure that from here onwards in the script lxd/lxc does not need sudo
-7. do lxd init with lxd-init-config file
-8. run lxd_docker_iptables.sh
+4. Install LXC on host:
+   sudo apt-get update && sudo apt-get install -y lxc
 
-9. create lxd profile "k8s" from k8s-profile-config
+5. Install LXD via snap:
+   sudo snap install lxd
 
-10 launch 3 lxd containers node1, node2, node3
-(
-lxc launch ubuntu:24.04 node1 --profile k8s --config devices.eth0.ipv4.address=10.67.38.87
-same for node2 - 10.67.38.221
-same for node3 - 10.67.38.211
-lxc start node1
-lxc start node2
-lxc start node3
-)
+6. Configure LXD group membership:
+   Make the current user a member of the 'lxd' group:
+     sudo usermod -aG lxd $USER
+   Ensure that from here onwards in the script, lxd/lxc commands do not require sudo (e.g. via 'sg lxd').
 
-11. Run "setup_ssh_lxd_nodes.sh" for ssh setup
+7. Initialize LXD with preseed configuration:
+   lxd init --preseed < lxd-init-config
 
-13. for all 3 nodes do
-i) scp containerd_install.sh, kubeadm_install.sh
-ii) ssh to container
-iii) run the script containerd_install.sh (with sudo for appropriate commands)
-iv) then --> rm -rf /etc/containerd/config.toml; mkdir -p /etc/containerd; containerd config default | tee /etc/containerd/config.toml
-v) then in generated containerd config.toml, change:
-- SystemdCgroup = true
-- disabled_plugins = []
-vi)
-- sudo systemctl daemon-reload
-- sudo systemctl restart containerd
-vii) run kubeadm_install.sh
-viii) kubeadm config images pull - check which version of pause
-ix) change the sandbox in containerd config.toml to this version
-e.g.
-    sandbox = 'registry.k8s.io/pause:3.10.2'
-x)
-- sudo systemctl daemon-reload
-- sudo systemctl restart containerd
+8. Configure Docker and LXD iptables coexistence:
+   bash lxd_docker_iptables.sh
 
-14. for node1
-i) scp kube-vip.sh and kubeadm-init-config.yaml
-ii) run kube-vip.sh
-iii) # Match the line containing 'hostPath:', then replace 'admin.conf' on the next line
-sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+9. Create LXD profile 'k8s' from k8s-profile-config:
+   lxc profile create k8s 2>/dev/null || true
+   lxc profile edit k8s < k8s-profile-config
 
-iv) run "kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification"
+10. Launch and start 3 LXD containers (node1, node2, node3):
+    lxc launch ubuntu:24.04 node1 --profile k8s --config devices.eth0.ipv4.address=10.67.38.87
+    lxc launch ubuntu:24.04 node2 --profile k8s --config devices.eth0.ipv4.address=10.67.38.221
+    lxc launch ubuntu:24.04 node3 --profile k8s --config devices.eth0.ipv4.address=10.67.38.211
 
-v) Note the token, discovery-token-ca-cert-hash and certificate-key from the command output e.g.
-  kubeadm join 10.106.138.219:6443 --token qxyig7.aspq12rm9ow36kh7 \
-	--discovery-token-ca-cert-hash sha256:8cbe689c503eedb6b9ef3dd82e8330181312640906b1db5b87fa797f49e54025 \
-	--control-plane --certificate-key 99b54442bedf79a05f5af4463586eabb9a1f857932a9539dc37c439e7e71bccd
+    Ensure all three containers are started:
+    lxc start node1
+    lxc start node2
+    lxc start node3
 
-vi) copy /etc/kubernetes/admin.conf to $HOME (as instructed by the command output)
-vii) check if api server is reachable and responds properly (like kubectl get nodes)
-viii) # Revert hostPath back to admin.conf safely
-sudo sed -i '/hostPath:/{n;s/super-admin.conf/admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
-ix) move /etc/kubernetes/manifests/kube-vip.yaml to /tmp/
-x) check kube-vip pod is deleted
-xi) move back /tmp/kube-vip.yaml to /etc/kubernetes/manifests/
-xii) check kube-vip pod is created
-xiii) exit out of node1 back to host machine
+11. Run SSH setup script for LXD nodes:
+    bash setup_ssh_lxd_nodes.sh
 
-15. Copy the k8s config file from node1 to host, so that kubectl can be used from host machine
+12. For all 3 nodes (node1, node2, node3):
+    i)   SCP containerd_install.sh and kubeadm_install.sh to the container.
+    ii)  SSH into the container.
+    iii) Run containerd_install.sh (with sudo for appropriate commands).
+    iv)  Generate default containerd configuration:
+         sudo rm -rf /etc/containerd/config.toml
+         sudo mkdir -p /etc/containerd
+         containerd config default | sudo tee /etc/containerd/config.toml
+    v)   In the generated /etc/containerd/config.toml, update:
+         - SystemdCgroup = true
+         - disabled_plugins = []
+    vi)  Reload systemd daemon and restart containerd:
+         sudo systemctl daemon-reload
+         sudo systemctl restart containerd
+    vii) Run kubeadm_install.sh.
+    viii) Pull images with kubeadm and determine the pause image version:
+         sudo kubeadm config images pull
+         (Check which version of pause image is specified)
+    ix)  Update the sandbox image in /etc/containerd/config.toml to match this version:
+         e.g. sandbox = 'registry.k8s.io/pause:3.10.2'
+    x)   Reload systemd daemon and restart containerd:
+         sudo systemctl daemon-reload
+         sudo systemctl restart containerd
 
-16. update the kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with appropriate values noted in 14.v)
-17. for node2:
-i) scp  kubeadm-join-cp2-config.yaml (modified)
-ii) run "kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification"
-iii) copy /etc/kubernetes/admin.conf to $HOME (as instructed by the command output)
-iv) exit out of node2 back to host machine
-18. for node3:
-i) scp  kubeadm-join-cp3-config.yaml (modified)
-ii) run "kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification"
-iii) copy /etc/kubernetes/admin.conf to $HOME (as instructed by the command output)
-iv) exit out of node3 back to host machine
-19. copy node1 /etc/kubernetes/manifests/kube-vip.yaml to node2 and node3 path /etc/kubernetes/manifests/
+13. For node1 (Bootstrap Control Plane):
+    i)    SCP kube-vip.sh and kubeadm-init-config.yaml to node1.
+    ii)   Run kube-vip.sh.
+    iii)  Temporarily update hostPath to super-admin.conf in kube-vip manifest:
+          # Match the line containing 'hostPath:', then replace 'admin.conf' on the next line
+          sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+    iv)   Initialize control plane with kubeadm:
+          sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification
+    v)    Note the token, discovery-token-ca-cert-hash, and certificate-key from the command output, e.g.:
+          kubeadm join 10.67.38.40:6443 --token <TOKEN> \
+              --discovery-token-ca-cert-hash sha256:<HASH> \
+              --control-plane --certificate-key <CERT_KEY>
+    vi)   Copy /etc/kubernetes/admin.conf to $HOME/.kube/config (as instructed by the command output).
+    vii)  Verify API server is reachable and responds properly (e.g. kubectl get nodes).
+    viii) Safely revert hostPath back to admin.conf:
+          sudo sed -i '/hostPath:/{n;s/super-admin.conf/admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+    ix)   Move /etc/kubernetes/manifests/kube-vip.yaml to /tmp/
+    x)    Verify kube-vip pod is terminated.
+    xi)   Move /tmp/kube-vip.yaml back to /etc/kubernetes/manifests/
+    xii)  Verify kube-vip pod is recreated and ready.
+    xiii) Exit out of node1 back to host machine.
 
-20. on host run cilium_cli_install.sh, helm_install.sh and kubectl_install.sh
-21. wget https://helm.isovalent.com/cilium-1.18.13.tgz
-22. run "helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml"
-23. run "kubectl apply -f ./cilium.yaml"
-24. run cilium status --wait and wait for its successful completion. it may exit if installation takes long, reopen the command till it exits successfully
-25. check for all 3 modes status Ready
-26. kubectl apply -f dnsutils.yaml
+14. Copy Kubernetes admin config from node1 to host machine:
+    Copy /home/$USER/.kube/config from node1 to $HOME/.kube/config on the host machine so kubectl can be used from the host.
+
+15. Update join configuration files on host:
+    Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
+
+16. For node2 (Join Control Plane):
+    i)   SCP modified kubeadm-join-cp2-config.yaml to node2.
+    ii)  Run:
+         sudo kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification
+    iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+    iv)  Exit out of node2 back to host machine.
+
+17. For node3 (Join Control Plane):
+    i)   SCP modified kubeadm-join-cp3-config.yaml to node3.
+    ii)  Run:
+         sudo kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification
+    iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+    iv)  Exit out of node3 back to host machine.
+
+18. Distribute kube-vip manifest:
+    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on both node2 and node3.
+
+19. Install host tools:
+    On the host machine, run:
+      bash cilium_cli_install.sh
+      bash helm_install.sh
+      bash kubectl_install.sh
+
+20. Remove control-plane taints from all nodes:
+    Run on host:
+      kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+    (Allows scheduling user and system workloads across all control plane nodes)
+
+21. Download Cilium Helm chart:
+    wget https://helm.isovalent.com/cilium-1.18.13.tgz
+
+22. Render Cilium deployment manifest:
+    helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
+
+23. Apply Cilium CNI to the cluster:
+    kubectl apply -f ./cilium.yaml
+
+24. Wait for Cilium deployment readiness:
+    Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
+
+25. Verify all nodes reach 'Ready' status:
+    Check that all 3 nodes (node1, node2, node3) report condition Ready:
+      kubectl get nodes -o wide
+
+26. Deploy test workload:
+    kubectl apply -f dnsutils.yaml
+    Verify cluster networking and DNS resolution.

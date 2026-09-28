@@ -25,8 +25,7 @@ if systemctl is-active --quiet docker; then
 
     # iv. Save the rules persistently without prompting the user
     echo "Saving firewall rules..."
-    export DEBIAN_FRONTEND=noninteractive
-    sudo apt-get install -y iptables-persistent
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
     sudo netfilter-persistent save
 else
     echo "Docker is not active. Skipping firewall adjustments."
