@@ -6,8 +6,7 @@ Implement an end-to-end, idempotent master bash script (`deploy_k8s.sh`) to auto
 
 > [!NOTE]
 > All architectural decisions have been discussed and aligned:
-> - **LXC via APT & LXD via Snap**: Step 4 installs `lxc` via `apt-get` and Step 5 installs `lxd` via `snap`.
-> - **In-Session Group Activation**: Uses `sg lxd` if `lxd` is not active in the current session so `lxc` never requires `sudo`.
+> - **LXD via Snap & LXC via APT**: Step 1 installs `lxd` via `snap` and Step 2 configures/activates `lxd` group membership with `sg lxd` so subsequent steps run in the group without logout. Step 3 installs `lxc` via `apt` (with a `dpkg -s` guard to avoid redundant installs), followed by Steps 4–6 configuring UFW, kernel modules, and sysctl.
 > - **Single Source of Truth for Node IPs**: `HOSTS_ENTRIES` is defined at the top of `deploy_k8s.sh` and passed directly as arguments to `setup_ssh_lxd_nodes.sh`.
 > - **Control Plane Taint Removal**: Added Step 21 (`kubectl taint nodes --all node-role.kubernetes.io/control-plane-`) before Cilium deployment so pods can schedule across all control-plane nodes.
 > - **Non-Interactive Execution**: Added `-y` to `apt` commands in `containerd_install.sh` and `helm_install.sh`, and passed `DEBIAN_FRONTEND=noninteractive` directly to `sudo` in `lxd_docker_iptables.sh`.
