@@ -3,39 +3,45 @@
 # Note: Add 'sudo' where needed. The user is expected to provide sudo password.
 # ==============================================================================
 
-1. Disable UFW on host machine if present:
+1. Install LXD via snap:
+   sudo snap install lxd
+
+2. Configure LXD group membership:
+   Make the current user a member of the 'lxd' group:
+     sudo usermod -aG lxd $USER
+   Ensure that from here onwards in the script, lxd/lxc commands do not require sudo (e.g. via 'sg lxd').
+
+3. Install LXC on host:
+   if ! dpkg -s lxc >/dev/null 2>&1; then
+     sudo apt-get update && sudo apt-get install -y lxc
+   fi
+
+4. Disable UFW on host machine if present:
    sudo ufw disable
 
-2. Configure kernel modules on host:
-   Create /etc/modules-load.d/k8s.conf containing:
-     overlay
-     br_netfilter
-     nf_conntrack
+5. Configure kernel modules on host:
+   Overwrite /etc/modules-load.d/k8s.conf (do not append) to contain only the specified entries:
+     sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+nf_conntrack
+EOF
 
    And load these modules into the current host system:
      sudo modprobe overlay
      sudo modprobe br_netfilter
      sudo modprobe nf_conntrack
 
-3. Configure sysctl settings on host:
-   Create /etc/sysctl.d/99-k8s.conf containing:
-     net.bridge.bridge-nf-call-iptables  = 1
-     net.bridge.bridge-nf-call-ip6tables = 1
-     net.ipv4.ip_forward                 = 1
+6. Configure sysctl settings on host:
+   Overwrite /etc/sysctl.d/99-k8s.conf (do not append) to contain only the specified entries:
+     sudo tee /etc/sysctl.d/99-k8s.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
 
    And load settings into the current host system:
      sudo sysctl --system
-
-4. Install LXC on host:
-   sudo apt-get update && sudo apt-get install -y lxc
-
-5. Install LXD via snap:
-   sudo snap install lxd
-
-6. Configure LXD group membership:
-   Make the current user a member of the 'lxd' group:
-     sudo usermod -aG lxd $USER
-   Ensure that from here onwards in the script, lxd/lxc commands do not require sudo (e.g. via 'sg lxd').
 
 7. Initialize LXD with preseed configuration:
    lxd init --preseed < lxd-init-config

@@ -58,58 +58,9 @@ for ENTRY in "${HOSTS_ENTRIES[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
-# Step 1: ufw disable on host machine if present
+# Step 1: Install lxd via snap
 # ------------------------------------------------------------------------------
-step_header "1" "Disable UFW on host machine if present"
-if command -v ufw >/dev/null 2>&1; then
-    info "Disabling UFW..."
-    sudo ufw disable || true
-else
-    info "UFW is not installed. Skipping."
-fi
-
-# ------------------------------------------------------------------------------
-# Step 2: create /etc/modules-load.d/k8s.conf on host & load modules
-# ------------------------------------------------------------------------------
-step_header "2" "Configure and load kernel modules (overlay, br_netfilter, nf_conntrack)"
-info "Writing /etc/modules-load.d/k8s.conf..."
-sudo tee /etc/modules-load.d/k8s.conf <<EOF
-overlay
-br_netfilter
-nf_conntrack
-EOF
-
-info "Loading kernel modules into current host system..."
-sudo modprobe overlay
-sudo modprobe br_netfilter
-sudo modprobe nf_conntrack
-
-# ------------------------------------------------------------------------------
-# Step 3: create /etc/sysctl.d/99-k8s.conf on host & load sysctl
-# ------------------------------------------------------------------------------
-step_header "3" "Configure and apply sysctl settings"
-info "Writing /etc/sysctl.d/99-k8s.conf..."
-sudo tee /etc/sysctl.d/99-k8s.conf <<EOF
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
-
-info "Applying sysctl parameters..."
-sudo sysctl --system
-
-# ------------------------------------------------------------------------------
-# Step 4: Install lxc via apt
-# ------------------------------------------------------------------------------
-step_header "4" "Install LXC via apt"
-info "Updating apt repositories and installing lxc..."
-sudo apt-get update
-sudo apt-get install -y lxc
-
-# ------------------------------------------------------------------------------
-# Step 5: Install lxd via snap
-# ------------------------------------------------------------------------------
-step_header "5" "Install LXD via snap"
+step_header "1" "Install LXD via snap"
 if ! command -v snap >/dev/null 2>&1; then
     info "Installing snapd..."
     sudo apt-get install -y snapd
@@ -122,9 +73,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 6: Make current user member of lxd group; ensure lxc does not need sudo
+# Step 2: Make current user member of lxd group; ensure lxc does not need sudo
 # ------------------------------------------------------------------------------
-step_header "6" "Configure LXD group membership for $SSH_USER"
+step_header "2" "Configure LXD group membership for $SSH_USER"
 if ! id -nG "$SSH_USER" | grep -qw "lxd"; then
     info "Adding $SSH_USER to group 'lxd'..."
     sudo usermod -aG lxd "$SSH_USER"
@@ -136,6 +87,59 @@ if ! id -nG | grep -qw "lxd"; then
     exec sg lxd -c "$0 \"$@\""
 fi
 success "User $SSH_USER is in lxd group and lxc commands can run without sudo."
+
+# ------------------------------------------------------------------------------
+# Step 3: Install lxc via apt
+# ------------------------------------------------------------------------------
+step_header "3" "Install LXC via apt"
+if ! dpkg -s lxc >/dev/null 2>&1; then
+    info "Updating apt repositories and installing lxc..."
+    sudo apt-get update
+    sudo apt-get install -y lxc
+else
+    info "LXC is already installed. Skipping."
+fi
+
+# ------------------------------------------------------------------------------
+# Step 4: ufw disable on host machine if present
+# ------------------------------------------------------------------------------
+step_header "4" "Disable UFW on host machine if present"
+if command -v ufw >/dev/null 2>&1; then
+    info "Disabling UFW..."
+    sudo ufw disable || true
+else
+    info "UFW is not installed. Skipping."
+fi
+
+# ------------------------------------------------------------------------------
+# Step 5: create /etc/modules-load.d/k8s.conf on host & load modules
+# ------------------------------------------------------------------------------
+step_header "5" "Configure and load kernel modules (overlay, br_netfilter, nf_conntrack)"
+info "Writing /etc/modules-load.d/k8s.conf (overwriting to ensure no duplicates)..."
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+nf_conntrack
+EOF
+
+info "Loading kernel modules into current host system..."
+sudo modprobe overlay
+sudo modprobe br_netfilter
+sudo modprobe nf_conntrack
+
+# ------------------------------------------------------------------------------
+# Step 6: create /etc/sysctl.d/99-k8s.conf on host & load sysctl
+# ------------------------------------------------------------------------------
+step_header "6" "Configure and apply sysctl settings"
+info "Writing /etc/sysctl.d/99-k8s.conf (overwriting to ensure no duplicates)..."
+sudo tee /etc/sysctl.d/99-k8s.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+info "Applying sysctl parameters..."
+sudo sysctl --system
 
 # ------------------------------------------------------------------------------
 # Step 7: do lxd init with lxd-init-config file

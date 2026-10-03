@@ -36,12 +36,12 @@ We have automated the deployment of a High-Availability, multi-master Kubernetes
 
 | Step | Action | Implementation Detail |
 |---|---|---|
-| **1** | UFW disable | Checks if `ufw` command is present and disables it (`sudo ufw disable`). |
-| **2** | Kernel modules | Writes `overlay`, `br_netfilter`, `nf_conntrack` to `/etc/modules-load.d/k8s.conf` and loads with `modprobe`. |
-| **3** | Sysctl config | Writes bridge netfilter and `ip_forward=1` to `/etc/sysctl.d/99-k8s.conf` and applies with `sysctl --system`. |
-| **4** | Install LXC | Runs `sudo apt-get update && sudo apt-get install -y lxc`. |
-| **5** | Install LXD | Ensures `snapd` is present and runs `sudo snap install lxd`. |
-| **6** | Group & permissions | Adds `$USER` to `lxd` group and activates via `exec sg lxd` if not already active in current shell. |
+| **1** | Install LXD | Ensures `snapd` is present and runs `sudo snap install lxd`. |
+| **2** | Group & permissions | Adds `$USER` to `lxd` group and activates via `exec sg lxd` if not already active in current shell. |
+| **3** | Install LXC | Checks with `dpkg -s lxc` before running `sudo apt-get update && sudo apt-get install -y lxc`. |
+| **4** | UFW disable | Checks if `ufw` command is present and disables it (`sudo ufw disable`). |
+| **5** | Kernel modules | Writes `overlay`, `br_netfilter`, `nf_conntrack` to `/etc/modules-load.d/k8s.conf` and loads with `modprobe`. |
+| **6** | Sysctl config | Writes bridge netfilter and `ip_forward=1` to `/etc/sysctl.d/99-k8s.conf` and applies with `sysctl --system`. |
 | **7** | LXD initialization | Runs `cat lxd-init-config \| lxd init --preseed` (skips if bridge `lxdbr0` already configured). |
 | **8** | Docker-LXD firewall | Executes `bash lxd_docker_iptables.sh`. |
 | **9** | LXD `k8s` profile | Creates profile `k8s` and configures it with `lxc profile edit k8s < k8s-profile-config`. |
