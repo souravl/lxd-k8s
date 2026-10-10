@@ -39,17 +39,35 @@ fi
 echo "Using SSH public key: $SSH_PUB_KEY"
 echo "----------------------------------------"
 
-# 2. Prompt for ${USER}'s password
-read -rsp "Enter password for user '${USER}' inside containers: " USER_PASS
-echo
-read -rsp "Confirm password: " USER_PASS_CONFIRM
-echo
+# Check if passwordless SSH key authentication is already operational on all nodes
+ALL_SSH_OK=true
+for NODE in "${NODES[@]}"; do
+    if ! ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=2 "${USER}@${NODE}" "true" 2>/dev/null; then
+        ALL_SSH_OK=false
+        break
+    fi
+done
 
-if [ "$USER_PASS" != "$USER_PASS_CONFIRM" ]; then
-    echo "Error: Passwords do not match!"
-    exit 1
+if [ "$ALL_SSH_OK" = true ]; then
+    echo "[✓] Passwordless SSH access is already operational on all nodes: ${NODES[*]}"
+    echo "Skipping container user creation and password prompt."
+    exit 0
 fi
 
+# 2. Obtain ${USER}'s password for container creation
+if [ -n "${CONTAINER_PASS:-}" ]; then
+    USER_PASS="$CONTAINER_PASS"
+else
+    read -rsp "Enter password for user '${USER}' inside containers: " USER_PASS
+    echo
+    read -rsp "Confirm password: " USER_PASS_CONFIRM
+    echo
+
+    if [ "$USER_PASS" != "$USER_PASS_CONFIRM" ]; then
+        echo "Error: Passwords do not match!"
+        exit 1
+    fi
+fi
 echo "----------------------------------------"
 
 # 3. Process each LXD container

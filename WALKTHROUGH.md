@@ -1,34 +1,30 @@
 # Walkthrough: HA Kubernetes Deployment Script on LXD
 
-We have automated the deployment of a High-Availability, multi-master Kubernetes cluster on LXD containers by creating [`deploy_k8s.sh`](deploy_k8s.sh) and hardening the supporting scripts in the repository.
+We have automated and fully verified the deployment of a High-Availability, 3-node multi-master Kubernetes cluster on LXD containers with `kube-vip` and Cilium CNI by creating [`deploy_k8s.sh`](deploy_k8s.sh) and hardening all supporting repository scripts.
 
 ---
 
-## Changes Made
+## Changes Made & Hardening Applied
 
-### 1. New Master Deployment Script
+### 1. Master Deployment Script
 - **[`deploy_k8s.sh`](deploy_k8s.sh)**
   - Implements all 26 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
-  - Defines `HOSTS_ENTRIES` as the single source of truth at the script header.
-  - Automatically handles in-session `lxd` group activation via `exec sg lxd` if `$USER` was just added to the group, avoiding the need to log out and back in.
-  - Seamlessly captures join credentials from `kubeadm init` on `node1` and updates `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` dynamically.
-  - Automates `kube-vip` pod lifecycle via local CRI (`crictl`) checks during manifest updates to prevent VIP network deadlocks.
+  - **LXD Device Syntax**: Uses `-d eth0,ipv4.address="$IP"` (instead of `--config`) for static IP assignments on container launch.
+  - **Idempotent Node1 Bootstrap**: Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
+  - **Token Selection Filter**: Correctly filters `kubeadm token list` for tokens with `authentication,signing` usage (avoiding internal TTL proxy tokens created by `upload-certs`).
+  - **SSHFS-Safe In-Place Edits**: Replaced `sed -i` on join config files with safe temp-file writing (`sed ... > tmp && cat tmp > file`), ensuring compatibility with SSHFS and FUSE mounts.
+  - Automatically handles in-session `lxd` group activation via `exec sg lxd`.
 
-### 2. Modified Existing Scripts
-- **[`steps.txt`](steps.txt)**:
-  - Formatted, sequentially numbered (1 to 26), and added control-plane taint removal so pods can schedule across the all-control-plane topology.
+### 2. Supporting Scripts Hardened
+- **[`kubeadm_install.sh`](kubeadm_install.sh)**:
+  - Added `cri-tools` to the package installation list so `crictl` is always present on every node to inspect runtime containers when the API VIP is cycling.
 - **[`setup_ssh_lxd_nodes.sh`](setup_ssh_lxd_nodes.sh)**:
-  - Accepts `HOSTS_ENTRIES` dynamically from CLI arguments (passed by `deploy_k8s.sh`), while maintaining fallback defaults for standalone execution.
-  - Automatically derives the `NODES` array from `HOSTS_ENTRIES`.
-  - Moved the network and DNS resolution polling loop outside the `if [ "$STATE" != "RUNNING" ]` block so it always verifies connectivity before executing `apt-get update`.
+  - Added an initial check for existing passwordless SSH access across all nodes. If SSH is already working, it skips the container configuration and password prompt entirely.
+  - Added support for `CONTAINER_PASS` environment variable.
+- **[`steps.txt`](steps.txt)**:
+  - Updated step 10 to reflect `-d eth0,ipv4.address=...`.
 - **[`lxd_docker_iptables.sh`](lxd_docker_iptables.sh)**:
-  - Passed `DEBIAN_FRONTEND=noninteractive` directly to `sudo` (`sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent`) to prevent `sudo`'s `env_reset` from stripping the variable and causing interactive ncurses debconf prompts.
-- **[`kube-vip.sh`](kube-vip.sh)**:
-  - Added `sudo mkdir -p /etc/kubernetes/manifests` prior to writing `kube-vip.yaml` to ensure the target directory exists on clean nodes.
-- **[`containerd_install.sh`](containerd_install.sh)**:
-  - Added `-y` flag to `apt install` commands to ensure non-interactive execution during unattended setup.
-- **[`helm_install.sh`](helm_install.sh)**:
-  - Added `-y` flag to `sudo apt-get install helm`.
+  - Added `DEBIAN_FRONTEND=noninteractive` to `sudo apt-get install -y iptables-persistent`.
 
 ---
 
@@ -45,12 +41,12 @@ We have automated the deployment of a High-Availability, multi-master Kubernetes
 | **7** | LXD initialization | Runs `cat lxd-init-config \| lxd init --preseed` (skips if bridge `lxdbr0` already configured). |
 | **8** | Docker-LXD firewall | Executes `bash lxd_docker_iptables.sh`. |
 | **9** | LXD `k8s` profile | Creates profile `k8s` and configures it with `lxc profile edit k8s < k8s-profile-config`. |
-| **10** | Launch containers | Launches `node1` (10.67.38.87), `node2` (10.67.38.221), and `node3` (10.67.38.211) using profile `k8s`. |
-| **11** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"`. |
-| **12** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh`, regenerates `/etc/containerd/config.toml` (`SystemdCgroup = true`, `disabled_plugins = []`), detects pause image from `kubeadm config images list`, updates sandbox image, and restarts containerd. |
+| **10** | Launch containers | Launches `node1` (10.67.38.87), `node2` (10.67.38.221), and `node3` (10.67.38.211) using profile `k8s` and `-d eth0,ipv4.address=...`. |
+| **11** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"`. Skips prompt if SSH key auth is already functional. |
+| **12** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh`, regenerates `/etc/containerd/config.toml` (`SystemdCgroup = true`, `disabled_plugins = []`), updates pause sandbox image, and restarts containerd. |
 | **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
 | **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
-| **15** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml`. |
+| **15** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |
 | **16** | Node 2 join | SCPs `kubeadm-join-cp2-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node2`. |
 | **17** | Node 3 join | SCPs `kubeadm-join-cp3-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node3`. |
 | **18** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
@@ -65,27 +61,51 @@ We have automated the deployment of a High-Availability, multi-master Kubernetes
 
 ---
 
-## Verification & Validation Results
+## Live Verification Results
 
-1. **Syntax Validation**:
-   - `bash -n deploy_k8s.sh`: Passed (exit code 0).
-   - `bash -n setup_ssh_lxd_nodes.sh`: Passed (exit code 0).
-2. **File Permissions**:
-   - `deploy_k8s.sh` is executable (`-rwxrwxr-x`).
-3. **Environment & Live Cluster Checks**:
-   - Verified on running host that `jq` is pre-installed in Ubuntu 24.04 LXD image (`jq-1.7`).
-   - Verified that `agnhost:2.39` runs with default `CMD ["pause"]` without needing explicit sleep arguments.
-   - Verified that node taints (`node-role.kubernetes.io/control-plane-`) allow pods to schedule properly.
+The script was executed and validated inside an isolated Ubuntu 24.04 KVM VM (`test-k8s`):
 
----
-
-## How to Execute
-
-To execute the deployment on a fresh host:
-
-```bash
-cd /path/to/lxd-k8s
-./deploy_k8s.sh
+### 1. Nodes Status
+```text
+NAME    STATUS   ROLES           AGE     VERSION   INTERNAL-IP    EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION              CONTAINER-RUNTIME
+node1   Ready    control-plane   35m     v1.37.1   10.67.38.87    <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.1
+node2   Ready    control-plane   5m47s   v1.37.1   10.67.38.221   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.1
+node3   Ready    control-plane   5m35s   v1.37.1   10.67.38.211   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.1
 ```
 
-During Step 11, the script will prompt for the password to configure for `$USER` inside the containers.
+### 2. Pods Status
+```text
+NAMESPACE     NAME                               READY   STATUS    RESTARTS   AGE
+default       dnsutils                           1/1     Running   0          2m24s
+kube-system   cilium-27j65                       1/1     Running   0          6m31s
+kube-system   cilium-4dxcr                       1/1     Running   0          6m31s
+kube-system   cilium-4qc6t                       1/1     Running   0          6m31s
+kube-system   cilium-envoy-9cxrh                 1/1     Running   0          6m31s
+kube-system   cilium-envoy-lbxls                 1/1     Running   0          6m31s
+kube-system   cilium-envoy-t7z2t                 1/1     Running   0          6m31s
+kube-system   cilium-operator-7f69674786-fmw8x   1/1     Running   0          6m31s
+kube-system   cilium-operator-7f69674786-qw7cx   1/1     Running   0          6m31s
+kube-system   coredns-559f6c778d-gkkpf           1/1     Running   0          36m
+kube-system   coredns-559f6c778d-trnvn           1/1     Running   0          36m
+kube-system   etcd-node1                         1/1     Running   0          36m
+kube-system   etcd-node2                         1/1     Running   0          7m22s
+kube-system   etcd-node3                         1/1     Running   0          7m11s
+kube-system   hubble-relay-7989949c9c-z47d7      1/1     Running   0          6m31s
+kube-system   hubble-ui-85fcdb8cd4-pk577         2/2     Running   0          6m31s
+kube-system   kube-apiserver-node1               1/1     Running   0          36m
+kube-system   kube-apiserver-node2               1/1     Running   0          7m22s
+kube-system   kube-apiserver-node3               1/1     Running   0          7m11s
+kube-system   kube-controller-manager-node1      1/1     Running   0          36m
+kube-system   kube-controller-manager-node2      1/1     Running   0          7m22s
+kube-system   kube-controller-manager-node3      1/1     Running   0          7m11s
+kube-system   kube-proxy-2w7qd                   1/1     Running   0          7m23s
+kube-system   kube-proxy-dt4d2                   1/1     Running   0          7m11s
+kube-system   kube-proxy-l849c                   1/1     Running   0          36m
+kube-system   kube-scheduler-node1               1/1     Running   0          36m
+kube-system   kube-scheduler-node2               1/1     Running   0          7m22s
+kube-system   kube-scheduler-node3               1/1     Running   0          7m11s
+kube-system   kube-vip-node1                     1/1     Running   0          7m30s
+kube-system   kube-vip-node2                     1/1     Running   0          7m10s
+kube-system   kube-vip-node3                     1/1     Running   0          7m9s
+```
+All static control plane pods, `kube-vip`, Cilium CNI, CoreDNS, and test workload `dnsutils` are 100% Ready and Running.

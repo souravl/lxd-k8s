@@ -168,11 +168,12 @@ fi
 # ------------------------------------------------------------------------------
 step_header "9" "Create/Update LXD profile 'k8s'"
 if ! lxc profile list | grep -qw "k8s"; then
-    info "Creating lxd profile 'k8s'..."
-    lxc profile create k8s
+    info "Creating lxd profile 'k8s' with k8s-profile-config..."
+    lxc profile create k8s < "${SCRIPT_DIR}/k8s-profile-config"
+else
+    info "Applying k8s-profile-config to existing profile 'k8s'..."
+    lxc profile edit k8s < "${SCRIPT_DIR}/k8s-profile-config"
 fi
-info "Applying k8s-profile-config to profile 'k8s'..."
-lxc profile edit k8s < "${SCRIPT_DIR}/k8s-profile-config"
 
 # ------------------------------------------------------------------------------
 # Step 10: launch 3 lxd containers node1, node2, node3
@@ -182,7 +183,7 @@ for NODE in "${NODES[@]}"; do
     IP="${NODE_IPS[$NODE]}"
     if ! lxc info "$NODE" >/dev/null 2>&1; then
         info "Launching $NODE (IP: $IP) with profile 'k8s'..."
-        lxc launch ubuntu:24.04 "$NODE" --profile k8s --config devices.eth0.ipv4.address="$IP"
+        lxc launch ubuntu:24.04 "$NODE" --profile k8s -d eth0,ipv4.address="$IP"
     else
         info "Container $NODE already exists."
     fi
@@ -265,21 +266,26 @@ step_header "13" "Bootstrap control plane on node1"
 info "Copying kube-vip.sh and kubeadm-init-config.yaml to node1..."
 scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kube-vip.sh" "${SCRIPT_DIR}/kubeadm-init-config.yaml" "${SSH_USER}@node1:~/"
 
-# ii) & iii) Run kube-vip.sh and update hostPath to super-admin.conf
-info "Installing prerequisites, running kube-vip.sh, and modifying hostPath for bootstrap..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
-    sudo apt-get update -qq
-    sudo apt-get install -y -qq jq
-    sudo mkdir -p /etc/kubernetes/manifests
-    sudo bash ~/kube-vip.sh
-    # Match the line containing "hostPath:", then replace "admin.conf" on the next line
-    sudo sed -i "/hostPath:/{n;s/admin.conf/super-admin.conf/;}" /etc/kubernetes/manifests/kube-vip.yaml
-'
+# ii), iii), iv) Bootstrap node1 if not already initialized
+if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "[ -f /etc/kubernetes/admin.conf ]"; then
+    info "Installing prerequisites, running kube-vip.sh, and modifying hostPath for bootstrap..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq jq
+        sudo mkdir -p /etc/kubernetes/manifests
+        sudo bash ~/kube-vip.sh
+        # Match the line containing "hostPath:", then replace "admin.conf" on the next line
+        sudo sed -i "/hostPath:/{n;s/admin.conf/super-admin.conf/;}" /etc/kubernetes/manifests/kube-vip.yaml
+    '
 
-# iv) run kubeadm init
-info "Running kubeadm init on node1..."
-KUBEADM_INIT_OUTPUT=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification")
-echo "$KUBEADM_INIT_OUTPUT"
+    # iv) run kubeadm init
+    info "Running kubeadm init on node1..."
+    KUBEADM_INIT_OUTPUT=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification")
+    echo "$KUBEADM_INIT_OUTPUT"
+else
+    info "Node1 control plane is already initialized. Skipping kubeadm init."
+    KUBEADM_INIT_OUTPUT=""
+fi
 
 # v) Note the token, discovery-token-ca-cert-hash and certificate-key
 info "Extracting join credentials from kubeadm init output..."
@@ -289,8 +295,8 @@ JOIN_CERT_KEY=$(echo "$KUBEADM_INIT_OUTPUT" | grep -oP -- '--certificate-key\s+\
 
 # Fallbacks if output parsing missed any field
 if [ -z "$JOIN_TOKEN" ]; then
-    info "Retrieving token directly from node1..."
-    JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token list" | awk 'NR>1 {print $1; exit}')
+    info "Retrieving valid authentication token directly from node1..."
+    JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token list | awk '\$4 ~ /authentication/ {print \$1; exit}'")
     if [ -z "$JOIN_TOKEN" ]; then
         JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token create")
     fi
@@ -370,13 +376,19 @@ success "Kubeconfig successfully copied to $HOME/.kube/config."
 # Step 15: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
 # ------------------------------------------------------------------------------
 step_header "15" "Update join configs for node2 and node3"
-sed -i "s|token: \".*\"|token: \"${JOIN_TOKEN}\"|g" "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml"
-sed -i "s|caCertHashes: \[\".*\"\]|caCertHashes: [\"${JOIN_CA_HASH}\"]|g" "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml"
-sed -i "s|certificateKey: \".*\"|certificateKey: \"${JOIN_CERT_KEY}\"|g" "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml"
+update_join_config() {
+    local target_file="$1"
+    local tmp_file
+    tmp_file=$(mktemp)
+    sed -e "s|token: \".*\"|token: \"${JOIN_TOKEN}\"|g" \
+        -e "s|caCertHashes: \[\".*\"\]|caCertHashes: [\"${JOIN_CA_HASH}\"]|g" \
+        -e "s|certificateKey: \".*\"|certificateKey: \"${JOIN_CERT_KEY}\"|g" "$target_file" > "$tmp_file"
+    cat "$tmp_file" > "$target_file"
+    rm -f "$tmp_file"
+}
 
-sed -i "s|token: \".*\"|token: \"${JOIN_TOKEN}\"|g" "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
-sed -i "s|caCertHashes: \[\".*\"\]|caCertHashes: [\"${JOIN_CA_HASH}\"]|g" "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
-sed -i "s|certificateKey: \".*\"|certificateKey: \"${JOIN_CERT_KEY}\"|g" "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
+update_join_config "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml"
+update_join_config "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
 success "Join configurations updated with new tokens and certificate key."
 
 # ------------------------------------------------------------------------------

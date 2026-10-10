@@ -54,9 +54,9 @@ EOF
    lxc profile edit k8s < k8s-profile-config
 
 10. Launch and start 3 LXD containers (node1, node2, node3):
-    lxc launch ubuntu:24.04 node1 --profile k8s --config devices.eth0.ipv4.address=10.67.38.87
-    lxc launch ubuntu:24.04 node2 --profile k8s --config devices.eth0.ipv4.address=10.67.38.221
-    lxc launch ubuntu:24.04 node3 --profile k8s --config devices.eth0.ipv4.address=10.67.38.211
+    lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
+    lxc launch ubuntu:24.04 node2 --profile k8s -d eth0,ipv4.address=10.67.38.221
+    lxc launch ubuntu:24.04 node3 --profile k8s -d eth0,ipv4.address=10.67.38.211
 
     Ensure all three containers are started:
     lxc start node1
