@@ -1,0 +1,164 @@
+# ==============================================================================
+# High-Availability Kubernetes Cluster on Incus - Step-by-Step Guide
+# Note: Add 'sudo' where needed. The user is expected to provide sudo password.
+# ==============================================================================
+
+1. Install Incus via APT:
+   sudo apt-get update
+   sudo apt-get install -y incus
+   (Or configure the official Zabbly Incus repository if not available on current distribution)
+
+2. Configure Incus group membership:
+   Make the current user a member of the 'incus-admin' group:
+     sudo usermod -aG incus-admin $USER
+   Ensure that from here onwards in the script, incus commands do not require sudo (e.g. via 'sg incus-admin').
+
+3. Disable UFW on host machine if present:
+   sudo ufw disable
+
+4. Configure kernel modules on host:
+   Overwrite /etc/modules-load.d/k8s.conf (do not append) to contain only the specified entries:
+     sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+nf_conntrack
+EOF
+
+   And load these modules into the current host system:
+     sudo modprobe overlay
+     sudo modprobe br_netfilter
+     sudo modprobe nf_conntrack
+
+5. Configure sysctl settings on host:
+   Overwrite /etc/sysctl.d/99-k8s.conf (do not append) to contain only the specified entries:
+     sudo tee /etc/sysctl.d/99-k8s.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+   And load settings into the current host system:
+     sudo sysctl --system
+
+6. Initialize Incus with preseed configuration:
+   incus admin init --preseed < incus-init-config
+
+7. Configure Docker and Incus iptables coexistence:
+   bash incus_docker_iptables.sh
+
+8. Create Incus profile 'k8s' from k8s-profile-config-incus:
+   incus profile create k8s < k8s-profile-config-incus 2>/dev/null || true
+   incus profile edit k8s < k8s-profile-config-incus
+
+9. Launch and start 3 Incus containers (node1, node2, node3):
+    incus launch images:ubuntu/24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
+    incus launch images:ubuntu/24.04 node2 --profile k8s -d eth0,ipv4.address=10.67.38.221
+    incus launch images:ubuntu/24.04 node3 --profile k8s -d eth0,ipv4.address=10.67.38.211
+
+    Ensure all three containers are started:
+    incus start node1
+    incus start node2
+    incus start node3
+
+10. Run SSH setup script for Incus nodes:
+    bash setup_ssh_incus_nodes.sh
+
+11. For all 3 nodes (node1, node2, node3):
+    i)   SCP containerd_install.sh and kubeadm_install.sh to the container.
+    ii)  SSH into the container.
+    iii) Run containerd_install.sh (with sudo for appropriate commands).
+    iv)  Generate default containerd configuration:
+         sudo rm -rf /etc/containerd/config.toml
+         sudo mkdir -p /etc/containerd
+         containerd config default | sudo tee /etc/containerd/config.toml
+    v)   In the generated /etc/containerd/config.toml, update:
+         - SystemdCgroup = true
+         - disabled_plugins = []
+    vi)  Reload systemd daemon and restart containerd:
+         sudo systemctl daemon-reload
+         sudo systemctl restart containerd
+    vii) Run kubeadm_install.sh.
+    viii) Pull images with kubeadm and determine the pause image version:
+         sudo kubeadm config images pull
+         (Check which version of pause image is specified)
+    ix)  Update the sandbox image in /etc/containerd/config.toml to match this version:
+         e.g. sandbox = 'registry.k8s.io/pause:3.10.2'
+    x)   Reload systemd daemon and restart containerd:
+         sudo systemctl daemon-reload
+         sudo systemctl restart containerd
+
+12. For node1 (Bootstrap Control Plane):
+    i)    SCP kube-vip.sh and kubeadm-init-config.yaml to node1.
+    ii)   Run kube-vip.sh.
+    iii)  Temporarily update hostPath to super-admin.conf in kube-vip manifest:
+          # Match the line containing 'hostPath:', then replace 'admin.conf' on the next line
+          sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+    iv)   Initialize control plane with kubeadm:
+          sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification
+    v)    Note the token, discovery-token-ca-cert-hash, and certificate-key from the command output, e.g.:
+          kubeadm join 10.67.38.40:6443 --token <TOKEN> \
+              --discovery-token-ca-cert-hash sha256:<HASH> \
+              --control-plane --certificate-key <CERT_KEY>
+    vi)   Copy /etc/kubernetes/admin.conf to $HOME/.kube/config (as instructed by the command output).
+    vii)  Verify API server is reachable and responds properly (e.g. kubectl get nodes).
+    viii) Safely revert hostPath back to admin.conf:
+          sudo sed -i '/hostPath:/{n;s/super-admin.conf/admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+    ix)   Move /etc/kubernetes/manifests/kube-vip.yaml to /tmp/
+    x)    Verify kube-vip pod is terminated.
+    xi)   Move /tmp/kube-vip.yaml back to /etc/kubernetes/manifests/
+    xii)  Verify kube-vip pod is recreated and ready.
+    xiii) Exit out of node1 back to host machine.
+
+13. Copy Kubernetes admin config from node1 to host machine:
+    Copy /home/$USER/.kube/config from node1 to $HOME/.kube/config on the host machine so kubectl can be used from the host.
+
+14. Update join configuration files on host:
+    Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with the values noted in step 12.v (token, caCertHashes, certificateKey).
+
+15. For node2 (Join Control Plane):
+    i)   SCP modified kubeadm-join-cp2-config.yaml to node2.
+    ii)  Run:
+         sudo kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification
+    iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+    iv)  Exit out of node2 back to host machine.
+
+16. For node3 (Join Control Plane):
+    i)   SCP modified kubeadm-join-cp3-config.yaml to node3.
+    ii)  Run:
+         sudo kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification
+    iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+    iv)  Exit out of node3 back to host machine.
+
+17. Distribute kube-vip manifest:
+    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on both node2 and node3.
+
+18. Install host tools:
+    On the host machine, run:
+      bash cilium_cli_install.sh
+      bash helm_install.sh
+      bash kubectl_install.sh
+
+19. Remove control-plane taints from all nodes:
+    Run on host:
+      kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+    (Allows scheduling user and system workloads across all control plane nodes)
+
+20. Download Cilium Helm chart:
+    wget https://helm.isovalent.com/cilium-1.18.13.tgz
+
+21. Render Cilium deployment manifest:
+    helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
+
+22. Apply Cilium CNI to the cluster:
+    kubectl apply -f ./cilium.yaml
+
+23. Wait for Cilium deployment readiness:
+    Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
+
+24. Verify all nodes reach 'Ready' status:
+    Check that all 3 nodes (node1, node2, node3) report condition Ready:
+      kubectl get nodes -o wide
+
+25. Deploy test workload:
+    kubectl apply -f dnsutils.yaml
+    Verify cluster networking and DNS resolution.
