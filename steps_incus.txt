@@ -143,11 +143,11 @@ EOF
       kubectl taint nodes --all node-role.kubernetes.io/control-plane-
     (Allows scheduling user and system workloads across all control plane nodes)
 
-20. Download Cilium Helm chart:
-    wget https://helm.isovalent.com/cilium-1.18.13.tgz
+20. Download Cilium Helm chart (uses $CILIUM_VERSION from software_install_version.txt):
+    wget https://helm.isovalent.com/cilium-${CILIUM_VERSION}.tgz
 
 21. Render Cilium deployment manifest:
-    helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
+    helm template cilium ./cilium-${CILIUM_VERSION}.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 
 22. Apply Cilium CNI to the cluster:
     kubectl apply -f ./cilium.yaml

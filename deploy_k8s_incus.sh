@@ -38,6 +38,14 @@ step_header() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Source software versions if configured
+if [ -f "${SCRIPT_DIR}/software_install_version.txt" ]; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/software_install_version.txt"
+fi
+export KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.37}"
+export CILIUM_VERSION="${CILIUM_VERSION:-1.18.13}"
+
 SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o BatchMode=yes)
 
@@ -233,7 +241,7 @@ for NODE in "${NODES[@]}"; do
 
     # vii) run kubeadm_install.sh
     info "Running kubeadm_install.sh on $NODE..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; bash ~/kubeadm_install.sh"
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; export KUBERNETES_VERSION='${KUBERNETES_VERSION}'; bash ~/kubeadm_install.sh"
 
     # viii) kubeadm config images pull - check which version of pause
     # ix) change the sandbox in containerd config.toml to this version
@@ -466,19 +474,19 @@ kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 # ------------------------------------------------------------------------------
 # Step 20: Download Cilium helm chart
 # ------------------------------------------------------------------------------
-step_header "20" "Download Cilium 1.18.13 Helm chart"
-if [ ! -f "${SCRIPT_DIR}/cilium-1.18.13.tgz" ]; then
-    info "Fetching cilium-1.18.13.tgz..."
-    wget -nc https://helm.isovalent.com/cilium-1.18.13.tgz
+step_header "20" "Download Cilium ${CILIUM_VERSION} Helm chart"
+if [ ! -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
+    info "Fetching cilium-${CILIUM_VERSION}.tgz..."
+    wget -nc "https://helm.isovalent.com/cilium-${CILIUM_VERSION}.tgz"
 else
-    info "cilium-1.18.13.tgz already exists."
+    info "cilium-${CILIUM_VERSION}.tgz already exists."
 fi
 
 # ------------------------------------------------------------------------------
 # Step 21: Generate cilium.yaml using helm template
 # ------------------------------------------------------------------------------
 step_header "21" "Template Cilium Helm chart into cilium.yaml"
-helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
+helm template cilium "./cilium-${CILIUM_VERSION}.tgz" --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 success "Rendered cilium.yaml."
 
 # ------------------------------------------------------------------------------
