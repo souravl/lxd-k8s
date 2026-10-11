@@ -1,9 +1,9 @@
-enterprise:
-  featureGate:
-    approved:
-      - Multicast
-  multicast:
-    enabled: true
+#enterprise:
+#  featureGate:
+#    approved:
+#      - Multicast
+#  multicast:
+#    enabled: true
 
 cni:
   exclusive: false
