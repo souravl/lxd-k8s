@@ -89,21 +89,9 @@ fi
 success "User $SSH_USER is in lxd group and lxc commands can run without sudo."
 
 # ------------------------------------------------------------------------------
-# Step 3: Install lxc via apt
+# Step 3: ufw disable on host machine if present
 # ------------------------------------------------------------------------------
-step_header "3" "Install LXC via apt"
-if ! dpkg -s lxc >/dev/null 2>&1; then
-    info "Updating apt repositories and installing lxc..."
-    sudo apt-get update
-    sudo apt-get install -y lxc
-else
-    info "LXC is already installed. Skipping."
-fi
-
-# ------------------------------------------------------------------------------
-# Step 4: ufw disable on host machine if present
-# ------------------------------------------------------------------------------
-step_header "4" "Disable UFW on host machine if present"
+step_header "3" "Disable UFW on host machine if present"
 if command -v ufw >/dev/null 2>&1; then
     info "Disabling UFW..."
     sudo ufw disable || true
@@ -112,9 +100,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 5: create /etc/modules-load.d/k8s.conf on host & load modules
+# Step 4: create /etc/modules-load.d/k8s.conf on host & load modules
 # ------------------------------------------------------------------------------
-step_header "5" "Configure and load kernel modules (overlay, br_netfilter, nf_conntrack)"
+step_header "4" "Configure and load kernel modules (overlay, br_netfilter, nf_conntrack)"
 info "Writing /etc/modules-load.d/k8s.conf (overwriting to ensure no duplicates)..."
 sudo tee /etc/modules-load.d/k8s.conf <<EOF
 overlay
@@ -128,9 +116,9 @@ sudo modprobe br_netfilter
 sudo modprobe nf_conntrack
 
 # ------------------------------------------------------------------------------
-# Step 6: create /etc/sysctl.d/99-k8s.conf on host & load sysctl
+# Step 5: create /etc/sysctl.d/99-k8s.conf on host & load sysctl
 # ------------------------------------------------------------------------------
-step_header "6" "Configure and apply sysctl settings"
+step_header "5" "Configure and apply sysctl settings"
 info "Writing /etc/sysctl.d/99-k8s.conf (overwriting to ensure no duplicates)..."
 sudo tee /etc/sysctl.d/99-k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
@@ -142,9 +130,9 @@ info "Applying sysctl parameters..."
 sudo sysctl --system
 
 # ------------------------------------------------------------------------------
-# Step 7: do lxd init with lxd-init-config file
+# Step 6: do lxd init with lxd-init-config file
 # ------------------------------------------------------------------------------
-step_header "7" "Initialize LXD with lxd-init-config"
+step_header "6" "Initialize LXD with lxd-init-config"
 if ! lxc network show lxdbr0 >/dev/null 2>&1; then
     info "Applying lxd-init-config preseed..."
     cat "${SCRIPT_DIR}/lxd-init-config" | lxd init --preseed
@@ -153,9 +141,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 8: run lxd_docker_iptables.sh
+# Step 7: run lxd_docker_iptables.sh
 # ------------------------------------------------------------------------------
-step_header "8" "Run lxd_docker_iptables.sh"
+step_header "7" "Run lxd_docker_iptables.sh"
 if [ -f "${SCRIPT_DIR}/lxd_docker_iptables.sh" ]; then
     bash "${SCRIPT_DIR}/lxd_docker_iptables.sh"
 else
@@ -164,9 +152,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 9: create lxd profile 'k8s' from k8s-profile-config
+# Step 8: create lxd profile 'k8s' from k8s-profile-config
 # ------------------------------------------------------------------------------
-step_header "9" "Create/Update LXD profile 'k8s'"
+step_header "8" "Create/Update LXD profile 'k8s'"
 if ! lxc profile list | grep -qw "k8s"; then
     info "Creating lxd profile 'k8s' with k8s-profile-config..."
     lxc profile create k8s < "${SCRIPT_DIR}/k8s-profile-config"
@@ -176,9 +164,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 10: launch 3 lxd containers node1, node2, node3
+# Step 9: launch 3 lxd containers node1, node2, node3
 # ------------------------------------------------------------------------------
-step_header "10" "Launch and start LXD containers: ${NODES[*]}"
+step_header "9" "Launch and start LXD containers: ${NODES[*]}"
 for NODE in "${NODES[@]}"; do
     IP="${NODE_IPS[$NODE]}"
     if ! lxc info "$NODE" >/dev/null 2>&1; then
@@ -196,15 +184,15 @@ for NODE in "${NODES[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
-# Step 11: Run setup_ssh_lxd_nodes.sh for ssh setup
+# Step 10: Run setup_ssh_lxd_nodes.sh for ssh setup
 # ------------------------------------------------------------------------------
-step_header "11" "Run setup_ssh_lxd_nodes.sh"
+step_header "10" "Run setup_ssh_lxd_nodes.sh"
 bash "${SCRIPT_DIR}/setup_ssh_lxd_nodes.sh" "${HOSTS_ENTRIES[@]}"
 
 # ------------------------------------------------------------------------------
-# Step 12: Configure containerd & kubeadm on all 3 nodes
+# Step 11: Configure containerd & kubeadm on all 3 nodes
 # ------------------------------------------------------------------------------
-step_header "12" "Install and configure containerd and kubeadm on all 3 nodes"
+step_header "11" "Install and configure containerd and kubeadm on all 3 nodes"
 for NODE in "${NODES[@]}"; do
     info "--- Configuring runtime and Kubernetes binaries on $NODE ---"
     
@@ -258,9 +246,9 @@ for NODE in "${NODES[@]}"; do
 done
 
 # ------------------------------------------------------------------------------
-# Step 13: Bootstrap node1 with kube-vip and kubeadm init
+# Step 12: Bootstrap node1 with kube-vip and kubeadm init
 # ------------------------------------------------------------------------------
-step_header "13" "Bootstrap control plane on node1"
+step_header "12" "Bootstrap control plane on node1"
 
 # i) scp kube-vip.sh and kubeadm-init-config.yaml
 info "Copying kube-vip.sh and kubeadm-init-config.yaml to node1..."
@@ -364,18 +352,18 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
 success "Node1 bootstrap and kube-vip configuration complete."
 
 # ------------------------------------------------------------------------------
-# Step 14: Copy k8s config file from node1 to host
+# Step 13: Copy k8s config file from node1 to host
 # ------------------------------------------------------------------------------
-step_header "14" "Copy k8s config from node1 to host"
+step_header "13" "Copy k8s config from node1 to host"
 mkdir -p "$HOME/.kube"
 scp "${SSH_OPTS[@]}" "${SSH_USER}@node1:/home/${SSH_USER}/.kube/config" "$HOME/.kube/config"
 chmod 600 "$HOME/.kube/config"
 success "Kubeconfig successfully copied to $HOME/.kube/config."
 
 # ------------------------------------------------------------------------------
-# Step 15: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
+# Step 14: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
 # ------------------------------------------------------------------------------
-step_header "15" "Update join configs for node2 and node3"
+step_header "14" "Update join configs for node2 and node3"
 update_join_config() {
     local target_file="$1"
     local tmp_file
@@ -392,9 +380,9 @@ update_join_config "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
 success "Join configurations updated with new tokens and certificate key."
 
 # ------------------------------------------------------------------------------
-# Step 16: Join node2
+# Step 15: Join node2
 # ------------------------------------------------------------------------------
-step_header "16" "Join node2 to control plane"
+step_header "15" "Join node2 to control plane"
 info "Copying kubeadm-join-cp2-config.yaml to node2..."
 scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml" "${SSH_USER}@node2:~/"
 
@@ -408,9 +396,9 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" '
 success "Node2 joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 17: Join node3
+# Step 16: Join node3
 # ------------------------------------------------------------------------------
-step_header "17" "Join node3 to control plane"
+step_header "16" "Join node3 to control plane"
 info "Copying kubeadm-join-cp3-config.yaml to node3..."
 scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml" "${SSH_USER}@node3:~/"
 
@@ -424,9 +412,9 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" '
 success "Node3 joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 18: Copy node1 kube-vip.yaml to node2 and node3
+# Step 17: Copy node1 kube-vip.yaml to node2 and node3
 # ------------------------------------------------------------------------------
-step_header "18" "Distribute kube-vip.yaml to node2 and node3"
+step_header "17" "Distribute kube-vip.yaml to node2 and node3"
 TMP_KUBE_VIP=$(mktemp /tmp/kube-vip-XXXXXX.yaml)
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo cat /etc/kubernetes/manifests/kube-vip.yaml" > "$TMP_KUBE_VIP"
 
@@ -443,9 +431,9 @@ rm -f "$TMP_KUBE_VIP"
 success "Kube-vip manifests distributed to all control plane nodes."
 
 # ------------------------------------------------------------------------------
-# Step 19: Install cilium CLI, helm, and kubectl on host
+# Step 18: Install cilium CLI, helm, and kubectl on host
 # ------------------------------------------------------------------------------
-step_header "19" "Install cilium CLI, Helm, and Kubectl on host"
+step_header "18" "Install cilium CLI, Helm, and Kubectl on host"
 info "Running cilium_cli_install.sh..."
 bash "${SCRIPT_DIR}/cilium_cli_install.sh"
 
@@ -456,16 +444,16 @@ info "Running kubectl_install.sh..."
 bash "${SCRIPT_DIR}/kubectl_install.sh"
 
 # ------------------------------------------------------------------------------
-# Step 20: Remove control-plane taints from all nodes
+# Step 19: Remove control-plane taints from all nodes
 # ------------------------------------------------------------------------------
-step_header "20" "Remove control-plane taints from all nodes"
+step_header "19" "Remove control-plane taints from all nodes"
 info "Removing control-plane taints so all nodes can schedule workloads..."
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 
 # ------------------------------------------------------------------------------
-# Step 21: Download Cilium helm chart
+# Step 20: Download Cilium helm chart
 # ------------------------------------------------------------------------------
-step_header "21" "Download Cilium 1.18.13 Helm chart"
+step_header "20" "Download Cilium 1.18.13 Helm chart"
 if [ ! -f "${SCRIPT_DIR}/cilium-1.18.13.tgz" ]; then
     info "Fetching cilium-1.18.13.tgz..."
     wget -nc https://helm.isovalent.com/cilium-1.18.13.tgz
@@ -474,22 +462,22 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 22: Generate cilium.yaml using helm template
+# Step 21: Generate cilium.yaml using helm template
 # ------------------------------------------------------------------------------
-step_header "22" "Template Cilium Helm chart into cilium.yaml"
+step_header "21" "Template Cilium Helm chart into cilium.yaml"
 helm template cilium ./cilium-1.18.13.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 success "Rendered cilium.yaml."
 
 # ------------------------------------------------------------------------------
-# Step 23: Apply cilium.yaml
+# Step 22: Apply cilium.yaml
 # ------------------------------------------------------------------------------
-step_header "23" "Apply Cilium manifest"
+step_header "22" "Apply Cilium manifest"
 kubectl apply -f ./cilium.yaml
 
 # ------------------------------------------------------------------------------
-# Step 24: Wait for Cilium status
+# Step 23: Wait for Cilium status
 # ------------------------------------------------------------------------------
-step_header "24" "Wait for Cilium readiness"
+step_header "23" "Wait for Cilium readiness"
 info "Running cilium status --wait until successful..."
 until cilium status --wait; do
     warn "Cilium status timed out or exited before complete. Retrying in 5 seconds..."
@@ -498,17 +486,17 @@ done
 success "Cilium is healthy and ready!"
 
 # ------------------------------------------------------------------------------
-# Step 25: Check for all 3 nodes status Ready
+# Step 24: Check for all 3 nodes status Ready
 # ------------------------------------------------------------------------------
-step_header "25" "Check all 3 nodes are in Ready status"
+step_header "24" "Check all 3 nodes are in Ready status"
 info "Waiting for all nodes to report condition=Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
 
 # ------------------------------------------------------------------------------
-# Step 26: Apply dnsutils.yaml
+# Step 25: Apply dnsutils.yaml
 # ------------------------------------------------------------------------------
-step_header "26" "Apply dnsutils test pod"
+step_header "25" "Apply dnsutils test pod"
 kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true

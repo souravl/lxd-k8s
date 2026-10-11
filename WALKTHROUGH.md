@@ -8,8 +8,9 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 
 ### 1. Master Deployment Script
 - **[`deploy_k8s.sh`](deploy_k8s.sh)**
-  - Implements all 26 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
+  - Implements all 25 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
   - **LXD Device Syntax**: Uses `-d eth0,ipv4.address="$IP"` (instead of `--config`) for static IP assignments on container launch.
+  - **Clean Networking**: Removed legacy `apt install lxc` to avoid spawning the unused `lxcbr0` bridge and extra `dnsmasq` service.
   - **Idempotent Node1 Bootstrap**: Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
   - **Token Selection Filter**: Correctly filters `kubeadm token list` for tokens with `authentication,signing` usage (avoiding internal TTL proxy tokens created by `upload-certs`).
   - **SSHFS-Safe In-Place Edits**: Replaced `sed -i` on join config files with safe temp-file writing (`sed ... > tmp && cat tmp > file`), ensuring compatibility with SSHFS and FUSE mounts.
@@ -22,7 +23,7 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
   - Added an initial check for existing passwordless SSH access across all nodes. If SSH is already working, it skips the container configuration and password prompt entirely.
   - Added support for `CONTAINER_PASS` environment variable.
 - **[`steps.txt`](steps.txt)**:
-  - Updated step 10 to reflect `-d eth0,ipv4.address=...`.
+  - Updated step 9 to reflect `-d eth0,ipv4.address=...`.
 - **[`lxd_docker_iptables.sh`](lxd_docker_iptables.sh)**:
   - Added `DEBIAN_FRONTEND=noninteractive` to `sudo apt-get install -y iptables-persistent`.
 
@@ -34,30 +35,29 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 |---|---|---|
 | **1** | Install LXD | Ensures `snapd` is present and runs `sudo snap install lxd`. |
 | **2** | Group & permissions | Adds `$USER` to `lxd` group and activates via `exec sg lxd` if not already active in current shell. |
-| **3** | Install LXC | Checks with `dpkg -s lxc` before running `sudo apt-get update && sudo apt-get install -y lxc`. |
-| **4** | UFW disable | Checks if `ufw` command is present and disables it (`sudo ufw disable`). |
-| **5** | Kernel modules | Writes `overlay`, `br_netfilter`, `nf_conntrack` to `/etc/modules-load.d/k8s.conf` and loads with `modprobe`. |
-| **6** | Sysctl config | Writes bridge netfilter and `ip_forward=1` to `/etc/sysctl.d/99-k8s.conf` and applies with `sysctl --system`. |
-| **7** | LXD initialization | Runs `cat lxd-init-config \| lxd init --preseed` (skips if bridge `lxdbr0` already configured). |
-| **8** | Docker-LXD firewall | Executes `bash lxd_docker_iptables.sh`. |
-| **9** | LXD `k8s` profile | Creates profile `k8s` and configures it with `lxc profile edit k8s < k8s-profile-config`. |
-| **10** | Launch containers | Launches `node1` (10.67.38.87), `node2` (10.67.38.221), and `node3` (10.67.38.211) using profile `k8s` and `-d eth0,ipv4.address=...`. |
-| **11** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"`. Skips prompt if SSH key auth is already functional. |
-| **12** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh`, regenerates `/etc/containerd/config.toml` (`SystemdCgroup = true`, `disabled_plugins = []`), updates pause sandbox image, and restarts containerd. |
-| **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
-| **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
-| **15** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |
-| **16** | Node 2 join | SCPs `kubeadm-join-cp2-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node2`. |
-| **17** | Node 3 join | SCPs `kubeadm-join-cp3-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node3`. |
-| **18** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
-| **19** | Host tooling | Runs `cilium_cli_install.sh`, `helm_install.sh`, and `kubectl_install.sh` on the host. |
-| **20** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
-| **21** | Fetch Cilium chart | Downloads `cilium-1.18.13.tgz` via `wget -nc`. |
-| **22** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |
-| **23** | Apply Cilium | Runs `kubectl apply -f ./cilium.yaml`. |
-| **24** | Wait for Cilium | Loops `cilium status --wait` until ready. |
-| **25** | Verify nodes | Waits for all nodes to report condition `Ready` (`kubectl wait --for=condition=Ready nodes --all --timeout=300s`). |
-| **26** | Deploy dnsutils | Applies `dnsutils.yaml` and checks pod status. |
+| **3** | UFW disable | Checks if `ufw` command is present and disables it (`sudo ufw disable`). |
+| **4** | Kernel modules | Writes `overlay`, `br_netfilter`, `nf_conntrack` to `/etc/modules-load.d/k8s.conf` and loads with `modprobe`. |
+| **5** | Sysctl config | Writes bridge netfilter and `ip_forward=1` to `/etc/sysctl.d/99-k8s.conf` and applies with `sysctl --system`. |
+| **6** | LXD initialization | Runs `cat lxd-init-config \| lxd init --preseed` (skips if bridge `lxdbr0` already configured). |
+| **7** | Docker-LXD firewall | Executes `bash lxd_docker_iptables.sh`. |
+| **8** | LXD `k8s` profile | Creates profile `k8s` and configures it with `lxc profile edit k8s < k8s-profile-config`. |
+| **9** | Launch containers | Launches `node1` (10.67.38.87), `node2` (10.67.38.221), and `node3` (10.67.38.211) using profile `k8s` and `-d eth0,ipv4.address=...`. |
+| **10** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"`. Skips prompt if SSH key auth is already functional. |
+| **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh`, regenerates `/etc/containerd/config.toml` (`SystemdCgroup = true`, `disabled_plugins = []`), updates pause sandbox image, and restarts containerd. |
+| **12** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
+| **13** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
+| **14** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |
+| **15** | Node 2 join | SCPs `kubeadm-join-cp2-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node2`. |
+| **16** | Node 3 join | SCPs `kubeadm-join-cp3-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node3`. |
+| **17** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
+| **18** | Host tooling | Runs `cilium_cli_install.sh`, `helm_install.sh`, and `kubectl_install.sh` on the host. |
+| **19** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
+| **20** | Fetch Cilium chart | Downloads `cilium-1.18.13.tgz` via `wget -nc`. |
+| **21** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |
+| **22** | Apply Cilium | Runs `kubectl apply -f ./cilium.yaml`. |
+| **23** | Wait for Cilium | Loops `cilium status --wait` until ready. |
+| **24** | Verify nodes | Waits for all nodes to report condition `Ready` (`kubectl wait --for=condition=Ready nodes --all --timeout=300s`). |
+| **25** | Deploy dnsutils | Applies `dnsutils.yaml` and checks pod status. |
 
 ---
 
