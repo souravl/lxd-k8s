@@ -47,7 +47,7 @@ export KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.37}"
 export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
 
 SSH_USER="${USER}"
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o BatchMode=yes)
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)
 
 # Static IP to node mappings (passed to setup_ssh_lxd_nodes.sh)
 HOSTS_ENTRIES=(
@@ -64,6 +64,16 @@ for ENTRY in "${HOSTS_ENTRIES[@]}"; do
     NODES+=("$NODE")
     NODE_IPS["$NODE"]="$IP"
 done
+
+# Clean stale host keys from ~/.ssh/known_hosts for cluster nodes from previous runs
+if [ -f "$HOME/.ssh/known_hosts" ]; then
+    for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+        _IP=$(echo "$ENTRY" | awk '{print $1}')
+        _NODE=$(echo "$ENTRY" | awk '{print $2}')
+        ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$_NODE" >/dev/null 2>&1 || true
+        ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$_IP" >/dev/null 2>&1 || true
+    done
+fi
 
 # ------------------------------------------------------------------------------
 # Step 1: Install lxd via snap
@@ -172,18 +182,115 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 9: launch 3 lxd containers node1, node2, node3
+# Step 9: launch lxd container node1
 # ------------------------------------------------------------------------------
-step_header "9" "Launch and start LXD containers: ${NODES[*]}"
-for NODE in "${NODES[@]}"; do
-    IP="${NODE_IPS[$NODE]}"
-    if ! lxc info "$NODE" >/dev/null 2>&1; then
-        info "Launching $NODE (IP: $IP) with profile 'k8s'..."
-        lxc launch ubuntu:24.04 "$NODE" --profile k8s -d eth0,ipv4.address="$IP"
-    else
-        info "Container $NODE already exists."
-    fi
+step_header "9" "Launch and start LXD container: node1"
+IP="${NODE_IPS[node1]}"
+if ! lxc info node1 >/dev/null 2>&1; then
+    info "Launching node1 (IP: $IP) with profile 'k8s'..."
+    lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address="$IP"
+else
+    info "Container node1 already exists."
+fi
 
+STATE=$(lxc info node1 | awk '/^Status:/ {print $2}')
+if [ "$STATE" != "RUNNING" ]; then
+    info "Starting node1..."
+    lxc start node1
+fi
+
+# ------------------------------------------------------------------------------
+# Step 10: Run setup_ssh_lxd_nodes.sh for ssh setup
+# ------------------------------------------------------------------------------
+step_header "10" "Run setup_ssh_lxd_nodes.sh on node1"
+bash "${SCRIPT_DIR}/setup_ssh_lxd_nodes.sh" "${HOSTS_ENTRIES[@]}"
+
+# ------------------------------------------------------------------------------
+# Step 11: Configure containerd & kubeadm on node1
+# ------------------------------------------------------------------------------
+step_header "11" "Install and configure containerd and kubeadm on node1"
+NODE="node1"
+info "--- Configuring runtime and Kubernetes binaries on $NODE ---"
+
+# i) scp containerd_install.sh, kubeadm_install.sh
+info "Copying installation scripts to $NODE..."
+scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/containerd_install.sh" "${SCRIPT_DIR}/kubeadm_install.sh" "${SSH_USER}@${NODE}:~/"
+
+# ii) & iii) run containerd_install.sh
+info "Running containerd_install.sh on $NODE..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; bash ~/containerd_install.sh"
+
+# iv) rm config.toml; mkdir -p; containerd config default | tee
+# v) SystemdCgroup = true, disabled_plugins = []
+# vi) daemon-reload and restart containerd
+info "Configuring containerd on $NODE..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
+    sudo rm -rf /etc/containerd/config.toml
+    sudo mkdir -p /etc/containerd
+    containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
+    sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+    sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
+    sudo systemctl daemon-reload
+    sudo systemctl restart containerd
+"
+
+# vii) run kubeadm_install.sh
+info "Running kubeadm_install.sh on $NODE..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; export KUBERNETES_VERSION='${KUBERNETES_VERSION}'; bash ~/kubeadm_install.sh"
+
+# viii) kubeadm config images pull - check which version of pause
+# ix) change the sandbox in containerd config.toml to this version
+# x) daemon-reload and restart containerd
+info "Detecting pause container image version on $NODE and updating containerd config..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
+    sudo kubeadm config images pull
+    PAUSE_IMAGE=$(sudo kubeadm config images list 2>/dev/null | grep -E "/pause:" | head -n 1)
+    if [ -z "$PAUSE_IMAGE" ]; then
+        PAUSE_IMAGE="registry.k8s.io/pause:3.10.2"
+    fi
+    echo "Detected pause image: $PAUSE_IMAGE"
+    if grep -q "sandbox_image = " /etc/containerd/config.toml; then
+        sudo sed -i "s|sandbox_image = .*|sandbox_image = \"${PAUSE_IMAGE}\"|g" /etc/containerd/config.toml
+    fi
+    if grep -q "sandbox = " /etc/containerd/config.toml; then
+        sudo sed -i "s|sandbox = .*|sandbox = \"${PAUSE_IMAGE}\"|g" /etc/containerd/config.toml
+    fi
+    sudo systemctl daemon-reload
+    sudo systemctl restart containerd
+'
+success "Runtime configured on $NODE."
+
+# ------------------------------------------------------------------------------
+# Step 12: Clone node2 and node3 from node1
+# ------------------------------------------------------------------------------
+step_header "12" "Clone node2 and node3 from node1"
+
+# i) Stop node1 and wait for it to stop
+info "Stopping node1 before cloning..."
+if [ "$(lxc info node1 | awk '/^Status:/ {print $2}')" = "RUNNING" ]; then
+    lxc stop node1
+fi
+until [ "$(lxc info node1 | awk '/^Status:/ {print $2}')" = "STOPPED" ]; do
+    info "Waiting for node1 to stop..."
+    sleep 1
+done
+success "node1 is stopped."
+
+# ii) Copy node2 and node3 from node1 and configure their static IPs
+for TARGET_NODE in node2 node3; do
+    IP="${NODE_IPS[$TARGET_NODE]}"
+    if ! lxc info "$TARGET_NODE" >/dev/null 2>&1; then
+        info "Copying $TARGET_NODE from node1..."
+        lxc copy node1 "$TARGET_NODE"
+        info "Setting static IP ($IP) on $TARGET_NODE..."
+        lxc config device set "$TARGET_NODE" eth0 ipv4.address "$IP"
+    else
+        info "Container $TARGET_NODE already exists."
+    fi
+done
+
+# iii) Start node1, node2, and node3
+for NODE in "${NODES[@]}"; do
     STATE=$(lxc info "$NODE" | awk '/^Status:/ {print $2}')
     if [ "$STATE" != "RUNNING" ]; then
         info "Starting $NODE..."
@@ -191,72 +298,35 @@ for NODE in "${NODES[@]}"; do
     fi
 done
 
-# ------------------------------------------------------------------------------
-# Step 10: Run setup_ssh_lxd_nodes.sh for ssh setup
-# ------------------------------------------------------------------------------
-step_header "10" "Run setup_ssh_lxd_nodes.sh"
-bash "${SCRIPT_DIR}/setup_ssh_lxd_nodes.sh" "${HOSTS_ENTRIES[@]}"
-
-# ------------------------------------------------------------------------------
-# Step 11: Configure containerd & kubeadm on all 3 nodes
-# ------------------------------------------------------------------------------
-step_header "11" "Install and configure containerd and kubeadm on all 3 nodes"
+# iv) Wait for all nodes to be RUNNING
 for NODE in "${NODES[@]}"; do
-    info "--- Configuring runtime and Kubernetes binaries on $NODE ---"
-    
-    # i) scp containerd_install.sh, kubeadm_install.sh
-    info "Copying installation scripts to $NODE..."
-    scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/containerd_install.sh" "${SCRIPT_DIR}/kubeadm_install.sh" "${SSH_USER}@${NODE}:~/"
-
-    # ii) & iii) run containerd_install.sh
-    info "Running containerd_install.sh on $NODE..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; bash ~/containerd_install.sh"
-
-    # iv) rm config.toml; mkdir -p; containerd config default | tee
-    # v) SystemdCgroup = true, disabled_plugins = []
-    # vi) daemon-reload and restart containerd
-    info "Configuring containerd on $NODE..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
-        sudo rm -rf /etc/containerd/config.toml
-        sudo mkdir -p /etc/containerd
-        containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
-        sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
-        sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
-        sudo systemctl daemon-reload
-        sudo systemctl restart containerd
-    "
-
-    # vii) run kubeadm_install.sh
-    info "Running kubeadm_install.sh on $NODE..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; export KUBERNETES_VERSION='${KUBERNETES_VERSION}'; bash ~/kubeadm_install.sh"
-
-    # viii) kubeadm config images pull - check which version of pause
-    # ix) change the sandbox in containerd config.toml to this version
-    # x) daemon-reload and restart containerd
-    info "Detecting pause container image version on $NODE and updating containerd config..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
-        sudo kubeadm config images pull
-        PAUSE_IMAGE=$(sudo kubeadm config images list 2>/dev/null | grep -E "/pause:" | head -n 1)
-        if [ -z "$PAUSE_IMAGE" ]; then
-            PAUSE_IMAGE="registry.k8s.io/pause:3.10.2"
-        fi
-        echo "Detected pause image: $PAUSE_IMAGE"
-        if grep -q "sandbox_image = " /etc/containerd/config.toml; then
-            sudo sed -i "s|sandbox_image = .*|sandbox_image = \"${PAUSE_IMAGE}\"|g" /etc/containerd/config.toml
-        fi
-        if grep -q "sandbox = " /etc/containerd/config.toml; then
-            sudo sed -i "s|sandbox = .*|sandbox = \"${PAUSE_IMAGE}\"|g" /etc/containerd/config.toml
-        fi
-        sudo systemctl daemon-reload
-        sudo systemctl restart containerd
-    '
-    success "Runtime configured on $NODE."
+    until [ "$(lxc info "$NODE" | awk '/^Status:/ {print $2}')" = "RUNNING" ]; do
+        info "Waiting for $NODE to reach RUNNING status..."
+        sleep 1
+    done
 done
 
+# v) Set hostnames, regenerate machine-ids, and verify SSH
+for TARGET_NODE in node2 node3; do
+    info "Setting hostname and regenerating machine-id on $TARGET_NODE..."
+    lxc exec "$TARGET_NODE" -- bash -c "echo '$TARGET_NODE' > /etc/hostname && hostname '$TARGET_NODE'"
+    lxc exec "$TARGET_NODE" -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup" >/dev/null 2>&1
+done
+
+# Verify SSH connectivity to all nodes
+for NODE in "${NODES[@]}"; do
+    info "Verifying SSH connectivity to $NODE..."
+    until ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "true" 2>/dev/null; do
+        sleep 2
+    done
+    success "SSH to $NODE is operational."
+done
+success "All nodes (node1, node2, node3) are cloned, started, and reachable via SSH."
+
 # ------------------------------------------------------------------------------
-# Step 12: Bootstrap node1 with kube-vip and kubeadm init
+# Step 13: Bootstrap node1 with kube-vip and kubeadm init
 # ------------------------------------------------------------------------------
-step_header "12" "Bootstrap control plane on node1"
+step_header "13" "Bootstrap control plane on node1"
 
 # i) scp kube-vip.sh and kubeadm-init-config.yaml
 info "Copying kube-vip.sh and kubeadm-init-config.yaml to node1..."
@@ -360,18 +430,18 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
 success "Node1 bootstrap and kube-vip configuration complete."
 
 # ------------------------------------------------------------------------------
-# Step 13: Copy k8s config file from node1 to host
+# Step 14: Copy k8s config file from node1 to host
 # ------------------------------------------------------------------------------
-step_header "13" "Copy k8s config from node1 to host"
+step_header "14" "Copy k8s config from node1 to host"
 mkdir -p "$HOME/.kube"
 scp "${SSH_OPTS[@]}" "${SSH_USER}@node1:/home/${SSH_USER}/.kube/config" "$HOME/.kube/config"
 chmod 600 "$HOME/.kube/config"
 success "Kubeconfig successfully copied to $HOME/.kube/config."
 
 # ------------------------------------------------------------------------------
-# Step 14: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
+# Step 15: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
 # ------------------------------------------------------------------------------
-step_header "14" "Update join configs for node2 and node3"
+step_header "15" "Update join configs for node2 and node3"
 update_join_config() {
     local target_file="$1"
     local tmp_file
@@ -388,9 +458,9 @@ update_join_config "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
 success "Join configurations updated with new tokens and certificate key."
 
 # ------------------------------------------------------------------------------
-# Step 15: Join node2
+# Step 16: Join node2
 # ------------------------------------------------------------------------------
-step_header "15" "Join node2 to control plane"
+step_header "16" "Join node2 to control plane"
 info "Copying kubeadm-join-cp2-config.yaml to node2..."
 scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml" "${SSH_USER}@node2:~/"
 
@@ -404,9 +474,9 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" '
 success "Node2 joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 16: Join node3
+# Step 17: Join node3
 # ------------------------------------------------------------------------------
-step_header "16" "Join node3 to control plane"
+step_header "17" "Join node3 to control plane"
 info "Copying kubeadm-join-cp3-config.yaml to node3..."
 scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml" "${SSH_USER}@node3:~/"
 
@@ -420,9 +490,9 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" '
 success "Node3 joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 17: Copy node1 kube-vip.yaml to node2 and node3
+# Step 18: Copy node1 kube-vip.yaml to node2 and node3
 # ------------------------------------------------------------------------------
-step_header "17" "Distribute kube-vip.yaml to node2 and node3"
+step_header "18" "Distribute kube-vip.yaml to node2 and node3"
 TMP_KUBE_VIP=$(mktemp /tmp/kube-vip-XXXXXX.yaml)
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo cat /etc/kubernetes/manifests/kube-vip.yaml" > "$TMP_KUBE_VIP"
 
@@ -439,9 +509,9 @@ rm -f "$TMP_KUBE_VIP"
 success "Kube-vip manifests distributed to all control plane nodes."
 
 # ------------------------------------------------------------------------------
-# Step 18: Install cilium CLI, helm, and kubectl on host
+# Step 19: Install cilium CLI, helm, and kubectl on host
 # ------------------------------------------------------------------------------
-step_header "18" "Install cilium CLI, Helm, and Kubectl on host"
+step_header "19" "Install cilium CLI, Helm, and Kubectl on host"
 info "Running cilium_cli_install.sh..."
 bash "${SCRIPT_DIR}/cilium_cli_install.sh"
 
@@ -452,16 +522,16 @@ info "Running kubectl_install.sh..."
 bash "${SCRIPT_DIR}/kubectl_install.sh"
 
 # ------------------------------------------------------------------------------
-# Step 19: Remove control-plane taints from all nodes
+# Step 20: Remove control-plane taints from all nodes
 # ------------------------------------------------------------------------------
-step_header "19" "Remove control-plane taints from all nodes"
+step_header "20" "Remove control-plane taints from all nodes"
 info "Removing control-plane taints so all nodes can schedule workloads..."
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 
 # ------------------------------------------------------------------------------
-# Step 20: Download Cilium helm chart
+# Step 21: Download Cilium helm chart
 # ------------------------------------------------------------------------------
-step_header "20" "Download Cilium ${CILIUM_VERSION} Helm chart"
+step_header "21" "Download Cilium ${CILIUM_VERSION} Helm chart"
 if [ ! -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
     info "Fetching cilium-${CILIUM_VERSION}.tgz..."
     helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
@@ -470,22 +540,22 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 21: Generate cilium.yaml using helm template
+# Step 22: Generate cilium.yaml using helm template
 # ------------------------------------------------------------------------------
-step_header "21" "Template Cilium Helm chart into cilium.yaml"
+step_header "22" "Template Cilium Helm chart into cilium.yaml"
 helm template cilium "./cilium-${CILIUM_VERSION}.tgz" --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 success "Rendered cilium.yaml."
 
 # ------------------------------------------------------------------------------
-# Step 22: Apply cilium.yaml
+# Step 23: Apply cilium.yaml
 # ------------------------------------------------------------------------------
-step_header "22" "Apply Cilium manifest"
+step_header "23" "Apply Cilium manifest"
 kubectl apply -f ./cilium.yaml
 
 # ------------------------------------------------------------------------------
-# Step 23: Wait for Cilium status
+# Step 24: Wait for Cilium status
 # ------------------------------------------------------------------------------
-step_header "23" "Wait for Cilium readiness"
+step_header "24" "Wait for Cilium readiness"
 info "Running cilium status --wait until successful..."
 until cilium status --wait; do
     warn "Cilium status timed out or exited before complete. Retrying in 5 seconds..."
@@ -494,26 +564,26 @@ done
 success "Cilium is healthy and ready!"
 
 # ------------------------------------------------------------------------------
-# Step 24: Check for all 3 nodes status Ready
+# Step 25: Check for all 3 nodes status Ready
 # ------------------------------------------------------------------------------
-step_header "24" "Check all 3 nodes are in Ready status"
+step_header "25" "Check all 3 nodes are in Ready status"
 info "Waiting for all nodes to report condition=Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
 
 # ------------------------------------------------------------------------------
-# Step 25: Apply dnsutils.yaml
+# Step 26: Apply dnsutils.yaml
 # ------------------------------------------------------------------------------
-step_header "25" "Apply dnsutils test pod"
+step_header "26" "Apply dnsutils test pod"
 kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
 kubectl get pods -A
 
 # ------------------------------------------------------------------------------
-# Step 26: Update /etc/hosts on host machine for cluster nodes
+# Step 27: Update /etc/hosts on host machine for cluster nodes
 # ------------------------------------------------------------------------------
-step_header "26" "Update /etc/hosts on host machine for cluster nodes"
+step_header "27" "Update /etc/hosts on host machine for cluster nodes"
 for ENTRY in "${HOSTS_ENTRIES[@]}"; do
     IP=$(echo "$ENTRY" | awk '{print $1}')
     NODE=$(echo "$ENTRY" | awk '{print $2}')

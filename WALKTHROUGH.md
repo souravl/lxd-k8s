@@ -8,7 +8,9 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 
 ### 1. Master Deployment Script
 - **[`deploy_k8s.sh`](deploy_k8s.sh)**
-  - Implements all 25 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
+  - Implements all 27 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
+  - **Node Cloning Architecture (Steps 9-12)**: Launches and provisions only `node1` with containerd, kubeadm, and pause image pre-pulling, then stops `node1` and clones `node2` and `node3` via `lxc copy`, assigns static IPs, sets hostnames directly (`echo ... > /etc/hostname && hostname ...`), regenerates machine IDs, and verifies SSH across all nodes.
+  - **SSH Host Key Resilience**: Prunes stale keys from `$HOME/.ssh/known_hosts` on startup and sets `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)` so re-running after deleting and recreating containers never encounters `Host key verification failed`.
   - **LXD Device Syntax**: Uses `-d eth0,ipv4.address="$IP"` (instead of `--config`) for static IP assignments on container launch.
   - **Clean Networking**: Removed legacy `apt install lxc` to avoid spawning the unused `lxcbr0` bridge and extra `dnsmasq` service.
   - **Idempotent Node1 Bootstrap**: Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
@@ -20,6 +22,8 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 - **[`kubeadm_install.sh`](kubeadm_install.sh)**:
   - Added `cri-tools` to the package installation list so `crictl` is always present on every node to inspect runtime containers when the API VIP is cycling.
 - **[`setup_ssh_lxd_nodes.sh`](setup_ssh_lxd_nodes.sh)**:
+  - Automatically prunes stale cluster host keys from `$HOME/.ssh/known_hosts`.
+  - Uses `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` during connectivity checks to prevent host verification failures on recreated containers.
   - Added an initial check for existing passwordless SSH access across all nodes. If SSH is already working, it skips the container configuration and password prompt entirely.
   - Added support for `CONTAINER_PASS` environment variable.
 - **[`steps.txt`](steps.txt)**:
@@ -41,24 +45,25 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 | **6** | LXD initialization | Runs `cat lxd-init-config \| lxd init --preseed` (skips if bridge `lxdbr0` already configured). |
 | **7** | Docker-LXD firewall | Executes `bash lxd_docker_iptables.sh`. |
 | **8** | LXD `k8s` profile | Creates profile `k8s` and configures it with `lxc profile edit k8s < k8s-profile-config`. |
-| **9** | Launch containers | Launches `node1` (10.67.38.87), `node2` (10.67.38.221), and `node3` (10.67.38.211) using profile `k8s` and `-d eth0,ipv4.address=...`. |
-| **10** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"`. Skips prompt if SSH key auth is already functional. |
-| **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh`, regenerates `/etc/containerd/config.toml` (`SystemdCgroup = true`, `disabled_plugins = []`), updates pause sandbox image, and restarts containerd. |
-| **12** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
-| **13** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
-| **14** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |
-| **15** | Node 2 join | SCPs `kubeadm-join-cp2-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node2`. |
-| **16** | Node 3 join | SCPs `kubeadm-join-cp3-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node3`. |
-| **17** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
-| **18** | Host tooling | Runs `cilium_cli_install.sh`, `helm_install.sh`, and `kubectl_install.sh` on the host. |
-| **19** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
-| **20** | Fetch Cilium chart | Downloads `cilium-1.20.2.tgz` via `helm pull oci://quay.io/cilium/charts/cilium`. |
-| **21** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |
-| **22** | Apply Cilium | Runs `kubectl apply -f ./cilium.yaml`. |
-| **23** | Wait for Cilium | Loops `cilium status --wait` until ready. |
-| **24** | Verify nodes | Waits for all nodes to report condition `Ready` (`kubectl wait --for=condition=Ready nodes --all --timeout=300s`). |
-| **25** | Deploy dnsutils | Applies `dnsutils.yaml` and checks pod status. |
-| **26** | Update host /etc/hosts | Updates or adds static IP mappings for `node1`, `node2`, and `node3` in `/etc/hosts` on the host machine. |
+| **9** | Launch node1 | Launches only `node1` (10.67.38.87) using profile `k8s` and `-d eth0,ipv4.address=10.67.38.87`. |
+| **10** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"` to configure user, sudoers, and authorized keys on `node1`. |
+| **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh` on `node1` only, configures `config.toml`, and pulls pause image. |
+| **12** | Clone node2 & node3 | Stops `node1`, clones `node2` and `node3` via `lxc copy`, assigns their static IPs, starts all nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
+| **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
+| **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
+| **15** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |
+| **16** | Node 2 join | SCPs `kubeadm-join-cp2-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node2`. |
+| **17** | Node 3 join | SCPs `kubeadm-join-cp3-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node3`. |
+| **18** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
+| **19** | Host tooling | Runs `cilium_cli_install.sh`, `helm_install.sh`, and `kubectl_install.sh` on the host. |
+| **20** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
+| **21** | Fetch Cilium chart | Downloads `cilium-1.20.2.tgz` via `helm pull oci://quay.io/cilium/charts/cilium`. |
+| **22** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |
+| **23** | Apply Cilium | Runs `kubectl apply -f ./cilium.yaml`. |
+| **24** | Wait for Cilium | Loops `cilium status --wait` until ready. |
+| **25** | Verify nodes | Waits for all nodes to report condition `Ready` (`kubectl wait --for=condition=Ready nodes --all --timeout=300s`). |
+| **26** | Deploy dnsutils | Applies `dnsutils.yaml` and checks pod status. |
+| **27** | Update host /etc/hosts | Updates or adds static IP mappings for `node1`, `node2`, and `node3` in `/etc/hosts` on the host machine. |
 
 ---
 
