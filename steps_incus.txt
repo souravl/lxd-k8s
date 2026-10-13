@@ -144,7 +144,7 @@ EOF
     (Allows scheduling user and system workloads across all control plane nodes)
 
 20. Download Cilium Helm chart (uses $CILIUM_VERSION from software_install_version.txt):
-    wget https://helm.isovalent.com/cilium-${CILIUM_VERSION}.tgz
+    helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
 
 21. Render Cilium deployment manifest:
     helm template cilium ./cilium-${CILIUM_VERSION}.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
@@ -162,3 +162,6 @@ EOF
 25. Deploy test workload:
     kubectl apply -f dnsutils.yaml
     Verify cluster networking and DNS resolution.
+
+26. Update /etc/hosts on host machine:
+    Update or append static IP mappings for cluster nodes (node1, node2, node3) in the host's /etc/hosts.

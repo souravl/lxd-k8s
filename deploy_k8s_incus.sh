@@ -44,7 +44,7 @@ if [ -f "${SCRIPT_DIR}/software_install_version.txt" ]; then
     source "${SCRIPT_DIR}/software_install_version.txt"
 fi
 export KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.37}"
-export CILIUM_VERSION="${CILIUM_VERSION:-1.18.13}"
+export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
 
 SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o BatchMode=yes)
@@ -477,7 +477,7 @@ kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 step_header "20" "Download Cilium ${CILIUM_VERSION} Helm chart"
 if [ ! -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
     info "Fetching cilium-${CILIUM_VERSION}.tgz..."
-    wget -nc "https://helm.isovalent.com/cilium-${CILIUM_VERSION}.tgz"
+    helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
 else
     info "cilium-${CILIUM_VERSION}.tgz already exists."
 fi
@@ -522,6 +522,24 @@ kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
 kubectl get pods -A
+
+# ------------------------------------------------------------------------------
+# Step 26: Update /etc/hosts on host machine for cluster nodes
+# ------------------------------------------------------------------------------
+step_header "26" "Update /etc/hosts on host machine for cluster nodes"
+for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+    IP=$(echo "$ENTRY" | awk '{print $1}')
+    NODE=$(echo "$ENTRY" | awk '{print $2}')
+
+    if grep -E -q "^[0-9a-fA-F.:]+[[:space:]]+([^#]*[[:space:]]|)${NODE}([[:space:]]|$)" /etc/hosts; then
+        info "Updating IP for $NODE to $IP in /etc/hosts..."
+        sudo sed -i -E "/^[0-9a-fA-F.:]+[[:space:]]+([^#]*[[:space:]]|)${NODE}([[:space:]]|$)/ s/^[0-9a-fA-F.:]+/${IP}/" /etc/hosts
+    else
+        info "Adding $NODE ($IP) to /etc/hosts..."
+        echo -e "${IP}\t${NODE}" | sudo tee -a /etc/hosts >/dev/null
+    fi
+done
+success "Host /etc/hosts updated for cluster nodes."
 
 echo -e "\n${GREEN}======================================================================${NC}"
 echo -e "${GREEN}==> Kubernetes HA Cluster on Incus completed successfully!${NC}"

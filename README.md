@@ -29,7 +29,7 @@ Initial inspiration for this project came from [justmeandopensource/kubernetes (
 Configure target versions in `software_install_version.txt`:
 ```bash
 KUBERNETES_VERSION=v1.37
-CILIUM_VERSION=1.18.13
+CILIUM_VERSION=1.20.2
 ```
 
 ### 2. Deploy with Incus (Recommended)

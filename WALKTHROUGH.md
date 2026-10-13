@@ -52,12 +52,13 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 | **17** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
 | **18** | Host tooling | Runs `cilium_cli_install.sh`, `helm_install.sh`, and `kubectl_install.sh` on the host. |
 | **19** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
-| **20** | Fetch Cilium chart | Downloads `cilium-1.18.13.tgz` via `wget -nc`. |
+| **20** | Fetch Cilium chart | Downloads `cilium-1.20.2.tgz` via `helm pull oci://quay.io/cilium/charts/cilium`. |
 | **21** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |
 | **22** | Apply Cilium | Runs `kubectl apply -f ./cilium.yaml`. |
 | **23** | Wait for Cilium | Loops `cilium status --wait` until ready. |
 | **24** | Verify nodes | Waits for all nodes to report condition `Ready` (`kubectl wait --for=condition=Ready nodes --all --timeout=300s`). |
 | **25** | Deploy dnsutils | Applies `dnsutils.yaml` and checks pod status. |
+| **26** | Update host /etc/hosts | Updates or adds static IP mappings for `node1`, `node2`, and `node3` in `/etc/hosts` on the host machine. |
 
 ---
 
