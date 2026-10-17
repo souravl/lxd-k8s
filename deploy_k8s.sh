@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# deploy_k8s.sh - High-Availability Kubernetes Cluster on LXD
+# deploy_k8s.sh - High-Availability Kubernetes Cluster on Incus or LXD
 # Implements all steps from steps.txt
+# Usage: ./deploy_k8s.sh [-c incus|lxd]
 # ==============================================================================
 set -euo pipefail
 
@@ -35,25 +36,85 @@ step_header() {
     echo -e "${CYAN}======================================================================${NC}"
 }
 
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS]
+
+Automates the deployment of a 3-node HA Kubernetes cluster on Incus or LXD containers.
+
+Options:
+  -c <engine>    Container engine to use: 'incus' (default) or 'lxd'
+  -h             Show this help message
+EOF
+    exit 0
+}
+
+# ------------------------------------------------------------------------------
+# Parse CLI Options with getopts
+# ------------------------------------------------------------------------------
+ENGINE="incus"
+
+while getopts "c:h" opt; do
+    case "$opt" in
+        c) ENGINE="$OPTARG" ;;
+        h) usage ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+ENGINE="$(echo "$ENGINE" | tr '[:upper:]' '[:lower:]')"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Source software versions if configured
-if [ -f "${SCRIPT_DIR}/software_install_version.txt" ]; then
+# Source configuration & version inventory if present
+if [ -f "${SCRIPT_DIR}/inventory.txt" ]; then
     # shellcheck source=/dev/null
-    source "${SCRIPT_DIR}/software_install_version.txt"
+    source "${SCRIPT_DIR}/inventory.txt"
 fi
+export UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 export KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.37}"
 export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
+
+VIP="${VIP:-10.67.38.40}"
+BRIDGE_IPV4="${BRIDGE_IPV4:-10.67.38.1}"
+BRIDGE_IPV6="${BRIDGE_IPV6:-fd42:51e5:ef75:abeb::1}"
+NODE1_IP="${NODE1_IP:-10.67.38.87}"
+NODE2_IP="${NODE2_IP:-10.67.38.221}"
+NODE3_IP="${NODE3_IP:-10.67.38.211}"
+LIMITS_CPU="${LIMITS_CPU:-4}"
+LIMITS_MEMORY="${LIMITS_MEMORY:-4GB}"
+
+if [ "$ENGINE" = "incus" ]; then
+    ENGINE_NAME="Incus"
+    CONTAINER_CMD="incus"
+    GROUP="incus-admin"
+    BRIDGE="incusbr0"
+    STORAGE_POOL_DIR="/var/lib/incus/storage-pools/default"
+    INIT_CMD="incus admin init"
+    IMAGE="images:ubuntu/${UBUNTU_VERSION}"
+elif [ "$ENGINE" = "lxd" ]; then
+    ENGINE_NAME="LXD"
+    CONTAINER_CMD="lxc"
+    GROUP="lxd"
+    BRIDGE="lxdbr0"
+    STORAGE_POOL_DIR="/var/snap/lxd/common/lxd/storage-pools/default"
+    INIT_CMD="lxd init"
+    IMAGE="ubuntu:${UBUNTU_VERSION}"
+else
+    error "Invalid container engine: '$ENGINE'. Must be 'incus' or 'lxd'."
+    exit 1
+fi
 
 SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)
 
-# Static IP to node mappings (passed to setup_ssh_lxd_nodes.sh)
+# Static IP to node mappings (passed to setup_ssh_nodes.sh)
 HOSTS_ENTRIES=(
-    "10.67.38.87 node1"
-    "10.67.38.221 node2"
-    "10.67.38.211 node3"
+    "${NODE1_IP} node1"
+    "${NODE2_IP} node2"
+    "${NODE3_IP} node3"
 )
 
 NODES=()
@@ -75,36 +136,64 @@ if [ -f "$HOME/.ssh/known_hosts" ]; then
     done
 fi
 
+info "Selected container engine: ${ENGINE_NAME} (CLI: ${CONTAINER_CMD})"
+
 # ------------------------------------------------------------------------------
-# Step 1: Install lxd via snap
+# Step 1: Install container engine on host
 # ------------------------------------------------------------------------------
-step_header "1" "Install LXD via snap"
-if ! command -v snap >/dev/null 2>&1; then
-    info "Installing snapd..."
-    sudo apt-get install -y snapd
-fi
-if ! snap list lxd >/dev/null 2>&1; then
-    info "Installing lxd via snap..."
-    sudo snap install lxd
+step_header "1" "Install ${ENGINE_NAME} on host"
+if [ "$ENGINE" = "incus" ]; then
+    if ! command -v incus >/dev/null 2>&1; then
+        info "Installing Incus via APT..."
+        if ! apt-cache show incus >/dev/null 2>&1; then
+            info "Adding Zabbly Incus repository..."
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq curl ca-certificates
+            sudo mkdir -p /etc/apt/keyrings
+            sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+            sudo sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+EOF'
+            sudo apt-get update -qq
+        fi
+        sudo apt-get install -y incus
+    else
+        info "Incus is already installed."
+    fi
 else
-    info "LXD snap is already installed."
+    if ! command -v snap >/dev/null 2>&1; then
+        info "Installing snapd..."
+        sudo apt-get install -y snapd
+    fi
+    if ! snap list lxd >/dev/null 2>&1; then
+        info "Installing lxd via snap..."
+        sudo snap install lxd
+    else
+        info "LXD snap is already installed."
+    fi
 fi
 
 # ------------------------------------------------------------------------------
-# Step 2: Make current user member of lxd group; ensure lxc does not need sudo
+# Step 2: Configure group membership for $SSH_USER; ensure commands run without sudo
 # ------------------------------------------------------------------------------
-step_header "2" "Configure LXD group membership for $SSH_USER"
-if ! id -nG "$SSH_USER" | grep -qw "lxd"; then
-    info "Adding $SSH_USER to group 'lxd'..."
-    sudo usermod -aG lxd "$SSH_USER"
+step_header "2" "Configure ${ENGINE_NAME} group membership for $SSH_USER"
+if ! id -nG "$SSH_USER" | grep -qw "$GROUP"; then
+    info "Adding $SSH_USER to group '$GROUP'..."
+    sudo usermod -aG "$GROUP" "$SSH_USER"
 fi
 
-# If lxd is not in current shell's active groups, re-execute the script using sg lxd
-if ! id -nG | grep -qw "lxd"; then
-    info "Activating 'lxd' group for the current session without requiring logout..."
-    exec sg lxd -c "$0 \"$@\""
+# If group is not in current shell's active groups, re-execute the script using sg
+if ! id -nG | grep -qw "$GROUP"; then
+    info "Activating '$GROUP' group for the current session without requiring logout..."
+    exec sg "$GROUP" -c "${SCRIPT_DIR}/deploy_k8s.sh -c $ENGINE"
 fi
-success "User $SSH_USER is in lxd group and lxc commands can run without sudo."
+success "User $SSH_USER is in $GROUP group and $CONTAINER_CMD commands can run without sudo."
 
 # ------------------------------------------------------------------------------
 # Step 3: ufw disable on host machine if present
@@ -148,62 +237,71 @@ info "Applying sysctl parameters..."
 sudo sysctl --system
 
 # ------------------------------------------------------------------------------
-# Step 6: do lxd init with lxd-init-config file
+# Step 6: Initialize container engine with preseed configuration
 # ------------------------------------------------------------------------------
-step_header "6" "Initialize LXD with lxd-init-config"
-if ! lxc network show lxdbr0 >/dev/null 2>&1; then
-    info "Applying lxd-init-config preseed..."
-    cat "${SCRIPT_DIR}/lxd-init-config" | lxd init --preseed
+step_header "6" "Initialize ${ENGINE_NAME} with container-engine-init-config"
+if ! $CONTAINER_CMD network show "$BRIDGE" >/dev/null 2>&1; then
+    info "Applying parameterized container-engine-init-config preseed..."
+    sed \
+        -e "s|\${BRIDGE}|${BRIDGE}|g" \
+        -e "s|\${STORAGE_POOL_DIR}|${STORAGE_POOL_DIR}|g" \
+        -e "s|\${BRIDGE_IPV4}|${BRIDGE_IPV4}|g" \
+        -e "s|\${BRIDGE_IPV6}|${BRIDGE_IPV6}|g" \
+        "${SCRIPT_DIR}/container-engine-init-config" | $INIT_CMD --preseed
 else
-    info "LXD bridge 'lxdbr0' already exists. Skipping preseed."
+    info "${ENGINE_NAME} bridge '${BRIDGE}' already exists. Skipping preseed."
 fi
 
 # ------------------------------------------------------------------------------
-# Step 7: run lxd_docker_iptables.sh
+# Step 7: Run docker_iptables.sh for bridge firewall coexistence
 # ------------------------------------------------------------------------------
-step_header "7" "Run lxd_docker_iptables.sh"
-if [ -f "${SCRIPT_DIR}/lxd_docker_iptables.sh" ]; then
-    bash "${SCRIPT_DIR}/lxd_docker_iptables.sh"
+step_header "7" "Run docker_iptables.sh"
+if [ -f "${SCRIPT_DIR}/docker_iptables.sh" ]; then
+    BRIDGE_SUBNET="${BRIDGE_IPV4%.*}.0/24"
+    bash "${SCRIPT_DIR}/docker_iptables.sh" "$BRIDGE" "$BRIDGE_SUBNET"
 else
-    error "File ${SCRIPT_DIR}/lxd_docker_iptables.sh not found!"
+    error "File ${SCRIPT_DIR}/docker_iptables.sh not found!"
     exit 1
 fi
 
 # ------------------------------------------------------------------------------
-# Step 8: create lxd profile 'k8s' from k8s-profile-config
+# Step 8: Create/update container profile 'k8s'
 # ------------------------------------------------------------------------------
-step_header "8" "Create/Update LXD profile 'k8s'"
-if ! lxc profile list | grep -qw "k8s"; then
-    info "Creating lxd profile 'k8s' with k8s-profile-config..."
-    lxc profile create k8s < "${SCRIPT_DIR}/k8s-profile-config"
-else
-    info "Applying k8s-profile-config to existing profile 'k8s'..."
-    lxc profile edit k8s < "${SCRIPT_DIR}/k8s-profile-config"
+step_header "8" "Create/Update ${ENGINE_NAME} profile 'k8s'"
+if ! $CONTAINER_CMD profile list | grep -qw "k8s"; then
+    info "Creating profile 'k8s'..."
+    $CONTAINER_CMD profile create k8s
 fi
+info "Applying parameterized k8s-container-profile-config to profile 'k8s'..."
+sed \
+    -e "s|\${BRIDGE}|${BRIDGE}|g" \
+    -e "s|\${LIMITS_CPU}|${LIMITS_CPU}|g" \
+    -e "s|\${LIMITS_MEMORY}|${LIMITS_MEMORY}|g" \
+    "${SCRIPT_DIR}/k8s-container-profile-config" | $CONTAINER_CMD profile edit k8s
 
 # ------------------------------------------------------------------------------
-# Step 9: launch lxd container node1
+# Step 9: Launch container node1
 # ------------------------------------------------------------------------------
-step_header "9" "Launch and start LXD container: node1"
+step_header "9" "Launch and start ${ENGINE_NAME} container: node1"
 IP="${NODE_IPS[node1]}"
-if ! lxc info node1 >/dev/null 2>&1; then
+if ! $CONTAINER_CMD info node1 >/dev/null 2>&1; then
     info "Launching node1 (IP: $IP) with profile 'k8s'..."
-    lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address="$IP"
+    $CONTAINER_CMD launch "$IMAGE" node1 --profile k8s -d eth0,ipv4.address="$IP"
 else
     info "Container node1 already exists."
 fi
 
-STATE=$(lxc info node1 | awk '/^Status:/ {print $2}')
+STATE=$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')
 if [ "$STATE" != "RUNNING" ]; then
     info "Starting node1..."
-    lxc start node1
+    $CONTAINER_CMD start node1
 fi
 
 # ------------------------------------------------------------------------------
-# Step 10: Run setup_ssh_lxd_nodes.sh for ssh setup
+# Step 10: Run setup_ssh_nodes.sh for ssh setup
 # ------------------------------------------------------------------------------
-step_header "10" "Run setup_ssh_lxd_nodes.sh on node1"
-TARGET_NODES="node1" bash "${SCRIPT_DIR}/setup_ssh_lxd_nodes.sh" "${HOSTS_ENTRIES[@]}"
+step_header "10" "Run setup_ssh_nodes.sh on node1"
+CONTAINER_CMD="$CONTAINER_CMD" TARGET_NODES="node1" bash "${SCRIPT_DIR}/setup_ssh_nodes.sh" "${HOSTS_ENTRIES[@]}"
 
 # ------------------------------------------------------------------------------
 # Step 11: Configure containerd & kubeadm on node1
@@ -267,10 +365,10 @@ step_header "12" "Clone node2 and node3 from node1"
 
 # i) Stop node1 and wait for it to stop
 info "Stopping node1 before cloning..."
-if [ "$(lxc info node1 | awk '/^Status:/ {print $2}')" = "RUNNING" ]; then
-    lxc stop node1
+if [ "$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')" = "RUNNING" ]; then
+    $CONTAINER_CMD stop node1
 fi
-until [ "$(lxc info node1 | awk '/^Status:/ {print $2}')" = "STOPPED" ]; do
+until [ "$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')" = "STOPPED" ]; do
     info "Waiting for node1 to stop..."
     sleep 1
 done
@@ -279,11 +377,11 @@ success "node1 is stopped."
 # ii) Copy node2 and node3 from node1 and configure their static IPs
 for TARGET_NODE in node2 node3; do
     IP="${NODE_IPS[$TARGET_NODE]}"
-    if ! lxc info "$TARGET_NODE" >/dev/null 2>&1; then
+    if ! $CONTAINER_CMD info "$TARGET_NODE" >/dev/null 2>&1; then
         info "Copying $TARGET_NODE from node1..."
-        lxc copy node1 "$TARGET_NODE"
+        $CONTAINER_CMD copy node1 "$TARGET_NODE"
         info "Setting static IP ($IP) on $TARGET_NODE..."
-        lxc config device set "$TARGET_NODE" eth0 ipv4.address "$IP"
+        $CONTAINER_CMD config device set "$TARGET_NODE" eth0 ipv4.address "$IP"
     else
         info "Container $TARGET_NODE already exists."
     fi
@@ -291,16 +389,16 @@ done
 
 # iii) Start node1, node2, and node3
 for NODE in "${NODES[@]}"; do
-    STATE=$(lxc info "$NODE" | awk '/^Status:/ {print $2}')
+    STATE=$($CONTAINER_CMD info "$NODE" | awk '/^Status:/ {print $2}')
     if [ "$STATE" != "RUNNING" ]; then
         info "Starting $NODE..."
-        lxc start "$NODE"
+        $CONTAINER_CMD start "$NODE"
     fi
 done
 
 # iv) Wait for all nodes to be RUNNING
 for NODE in "${NODES[@]}"; do
-    until [ "$(lxc info "$NODE" | awk '/^Status:/ {print $2}')" = "RUNNING" ]; do
+    until [ "$($CONTAINER_CMD info "$NODE" | awk '/^Status:/ {print $2}')" = "RUNNING" ]; do
         info "Waiting for $NODE to reach RUNNING status..."
         sleep 1
     done
@@ -309,8 +407,8 @@ done
 # v) Set hostnames, regenerate machine-ids, and verify SSH
 for TARGET_NODE in node2 node3; do
     info "Setting hostname and regenerating machine-id on $TARGET_NODE..."
-    lxc exec "$TARGET_NODE" -- bash -c "echo '$TARGET_NODE' > /etc/hostname && hostname '$TARGET_NODE'"
-    lxc exec "$TARGET_NODE" -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup" >/dev/null 2>&1
+    $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "echo '$TARGET_NODE' > /etc/hostname && hostname '$TARGET_NODE'"
+    $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup" >/dev/null 2>&1
 done
 
 # Verify SSH connectivity to all nodes
@@ -328,91 +426,77 @@ success "All nodes (node1, node2, node3) are cloned, started, and reachable via 
 # ------------------------------------------------------------------------------
 step_header "13" "Bootstrap control plane on node1"
 
-# i) scp kube-vip.sh and kubeadm-init-config.yaml
-info "Copying kube-vip.sh and kubeadm-init-config.yaml to node1..."
-scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kube-vip.sh" "${SCRIPT_DIR}/kubeadm-init-config.yaml" "${SSH_USER}@node1:~/"
+# i) & ii) scp kube-vip.sh, run it
+info "Generating and configuring kube-vip on node1 (VIP: $VIP)..."
+scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kube-vip.sh" "${SSH_USER}@node1:~/"
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "export DEBIAN_FRONTEND=noninteractive; export VIP='${VIP}'; sudo -E bash ~/kube-vip.sh"
 
-# ii), iii), iv) Bootstrap node1 if not already initialized
-if ! ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "[ -f /etc/kubernetes/admin.conf ]"; then
-    info "Installing prerequisites, running kube-vip.sh, and modifying hostPath for bootstrap..."
-    ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq jq
-        sudo mkdir -p /etc/kubernetes/manifests
-        sudo bash ~/kube-vip.sh
-        # Match the line containing "hostPath:", then replace "admin.conf" on the next line
-        sudo sed -i "/hostPath:/{n;s/admin.conf/super-admin.conf/;}" /etc/kubernetes/manifests/kube-vip.yaml
-    '
-
-    # iv) run kubeadm init
-    info "Running kubeadm init on node1..."
-    KUBEADM_INIT_OUTPUT=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification")
-    echo "$KUBEADM_INIT_OUTPUT"
-else
-    info "Node1 control plane is already initialized. Skipping kubeadm init."
-    KUBEADM_INIT_OUTPUT=""
-fi
-
-# v) Note the token, discovery-token-ca-cert-hash and certificate-key
-info "Extracting join credentials from kubeadm init output..."
-JOIN_TOKEN=$(echo "$KUBEADM_INIT_OUTPUT" | grep -oP -- '--token\s+\K\S+' | head -n 1 || true)
-JOIN_CA_HASH=$(echo "$KUBEADM_INIT_OUTPUT" | grep -oP -- '--discovery-token-ca-cert-hash\s+\K\S+' | head -n 1 || true)
-JOIN_CERT_KEY=$(echo "$KUBEADM_INIT_OUTPUT" | grep -oP -- '--certificate-key\s+\K\S+' | head -n 1 || true)
-
-# Fallbacks if output parsing missed any field
-if [ -z "$JOIN_TOKEN" ]; then
-    info "Retrieving valid authentication token directly from node1..."
-    JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token list | awk '\$4 ~ /authentication/ {print \$1; exit}'")
-    if [ -z "$JOIN_TOKEN" ]; then
-        JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token create")
-    fi
-fi
-
-if [ -z "$JOIN_CA_HASH" ]; then
-    info "Generating CA cert hash directly from node1..."
-    RAW_HASH=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'")
-    JOIN_CA_HASH="sha256:${RAW_HASH}"
-fi
-
-if [ -z "$JOIN_CERT_KEY" ]; then
-    info "Uploading certs on node1 to obtain certificate key..."
-    JOIN_CERT_KEY=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null" | tail -n 1)
-fi
-
-info "Join Token:             $JOIN_TOKEN"
-info "Discovery CA Hash:      $JOIN_CA_HASH"
-info "Control Plane Cert Key: $JOIN_CERT_KEY"
-
-# vi) Copy admin.conf to $HOME/.kube/config on node1
-# vii) Check if API server is reachable
-# viii) Revert hostPath back to admin.conf safely
-# ix) Move kube-vip.yaml to /tmp/
-# x) Check kube-vip pod is deleted
-# xi) Move back /tmp/kube-vip.yaml to /etc/kubernetes/manifests/
-# xii) Check kube-vip pod is created
-# xiii) Exit out of node1 back to host machine
-info "Finalizing node1 configuration and cycling kube-vip..."
+# Temporarily point kube-vip to super-admin.conf for initial bootstrap
+info "Configuring kube-vip to use super-admin.conf during initial bootstrap..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
-    mkdir -p $HOME/.kube
-    sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
-    sudo chown $(id -u):$(id -g) $HOME/.kube/config
+    sudo sed -i "s|path: /etc/kubernetes/admin.conf|path: /etc/kubernetes/super-admin.conf|g" /etc/kubernetes/manifests/kube-vip.yaml
+'
 
-    echo "Checking API server response on node1..."
-    until kubectl get nodes >/dev/null 2>&1; do
-        sleep 2
-    done
-    kubectl get nodes
+# Copy parameterized kubeadm-init-config.yaml to node1
+info "Copying parameterized kubeadm-init-config.yaml to node1..."
+sed \
+    -e "s|\${NODE1_IP}|${NODE1_IP}|g" \
+    -e "s|\${NODE2_IP}|${NODE2_IP}|g" \
+    -e "s|\${NODE3_IP}|${NODE3_IP}|g" \
+    -e "s|\${VIP}|${VIP}|g" \
+    "${SCRIPT_DIR}/kubeadm-init-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "cat > ~/kubeadm-init-config.yaml"
 
-    echo "Reverting kube-vip hostPath to admin.conf..."
-    sudo sed -i "/hostPath:/{n;s/super-admin.conf/admin.conf/;}" /etc/kubernetes/manifests/kube-vip.yaml
+# Run kubeadm init (with idempotency guard)
+info "Executing kubeadm init on node1..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
+    if [ ! -f /etc/kubernetes/admin.conf ]; then
+        sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification
+    else
+        echo "Kubernetes control plane is already initialized on node1."
+    fi
+'
 
-    echo "Moving kube-vip.yaml to /tmp/ to restart pod..."
-    sudo mv /etc/kubernetes/manifests/kube-vip.yaml /tmp/
+# Configure local kubectl access for SSH_USER on node1
+info "Setting up local kubectl access for ${SSH_USER} on node1..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "
+    mkdir -p /home/${SSH_USER}/.kube
+    sudo cp -f /etc/kubernetes/admin.conf /home/${SSH_USER}/.kube/config
+    sudo chown \$(id -u):\$(id -g) /home/${SSH_USER}/.kube/config
+"
 
-    echo "Waiting for kube-vip pod to stop..."
-    while sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock pods --name kube-vip -q 2>/dev/null | grep -q .; do
-        sleep 2
-    done
+# Parse token, ca-cert-hash, and certificate-key directly from node1
+info "Extracting join credentials and certificates from node1..."
+JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "
+    sudo kubeadm token list 2>/dev/null | awk '\$3 ~ /authentication/ {print \$1; exit}'
+")
+if [ -z "$JOIN_TOKEN" ]; then
+    JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token create --print-join-command 2>/dev/null | awk '{print \$5}'")
+fi
+
+CA_CERT_HASH=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "
+    openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'
+")
+
+CERT_KEY=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "
+    sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -n 1
+")
+
+if [ -z "$JOIN_TOKEN" ] || [ -z "$CA_CERT_HASH" ] || [ -z "$CERT_KEY" ]; then
+    error "Failed to extract required join credentials (token, ca-cert-hash, or certificate-key) from node1."
+    exit 1
+fi
+info "Join credentials and certificates successfully extracted from node1."
+
+# Revert kube-vip hostPath to admin.conf and cycle via /tmp to force pod reload
+info "Reverting kube-vip to admin.conf and restarting via CRI..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
+    sudo sed -i "s|path: /etc/kubernetes/super-admin.conf|path: /etc/kubernetes/admin.conf|g" /etc/kubernetes/manifests/kube-vip.yaml
+    echo "Cycling kube-vip manifest via /tmp/ to trigger static pod reload..."
+    sudo mv /etc/kubernetes/manifests/kube-vip.yaml /tmp/kube-vip.yaml
+
+    echo "Stopping any existing kube-vip container..."
+    sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock stopp $(sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock pods --name kube-vip -q 2>/dev/null) 2>/dev/null || true
+    sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock rmp $(sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock pods --name kube-vip -q 2>/dev/null) 2>/dev/null || true
 
     echo "Restoring kube-vip.yaml to manifests..."
     sudo mv /tmp/kube-vip.yaml /etc/kubernetes/manifests/
@@ -441,28 +525,22 @@ success "Kubeconfig successfully copied to $HOME/.kube/config."
 # ------------------------------------------------------------------------------
 # Step 15: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
 # ------------------------------------------------------------------------------
-step_header "15" "Update join configs for node2 and node3"
-update_join_config() {
-    local target_file="$1"
-    local tmp_file
-    tmp_file=$(mktemp)
-    sed -e "s|token: \".*\"|token: \"${JOIN_TOKEN}\"|g" \
-        -e "s|caCertHashes: \[\".*\"\]|caCertHashes: [\"${JOIN_CA_HASH}\"]|g" \
-        -e "s|certificateKey: \".*\"|certificateKey: \"${JOIN_CERT_KEY}\"|g" "$target_file" > "$tmp_file"
-    cat "$tmp_file" > "$target_file"
-    rm -f "$tmp_file"
-}
-
-update_join_config "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml"
-update_join_config "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml"
-success "Join configurations updated with new tokens and certificate key."
+step_header "15" "Validate join credentials for node2 and node3"
+info "Active join credentials verified for control plane VIP: ${VIP}"
+success "Join credentials ready."
 
 # ------------------------------------------------------------------------------
 # Step 16: Join node2
 # ------------------------------------------------------------------------------
 step_header "16" "Join node2 to control plane"
-info "Copying kubeadm-join-cp2-config.yaml to node2..."
-scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml" "${SSH_USER}@node2:~/"
+info "Copying parameterized kubeadm-join-cp2-config.yaml to node2..."
+sed \
+    -e "s|\${NODE2_IP}|${NODE2_IP}|g" \
+    -e "s|\${VIP}|${VIP}|g" \
+    -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
+    -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
+    -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
+    "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" "cat > ~/kubeadm-join-cp2-config.yaml"
 
 info "Executing kubeadm join on node2..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" '
@@ -477,8 +555,14 @@ success "Node2 joined successfully."
 # Step 17: Join node3
 # ------------------------------------------------------------------------------
 step_header "17" "Join node3 to control plane"
-info "Copying kubeadm-join-cp3-config.yaml to node3..."
-scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml" "${SSH_USER}@node3:~/"
+info "Copying parameterized kubeadm-join-cp3-config.yaml to node3..."
+sed \
+    -e "s|\${NODE3_IP}|${NODE3_IP}|g" \
+    -e "s|\${VIP}|${VIP}|g" \
+    -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
+    -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
+    -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
+    "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" "cat > ~/kubeadm-join-cp3-config.yaml"
 
 info "Executing kubeadm join on node3..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" '
@@ -490,10 +574,10 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" '
 success "Node3 joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 18: Copy node1 kube-vip.yaml to node2 and node3
+# Step 18: Distribute kube-vip.yaml to node2 and node3
 # ------------------------------------------------------------------------------
 step_header "18" "Distribute kube-vip.yaml to node2 and node3"
-TMP_KUBE_VIP=$(mktemp /tmp/kube-vip-XXXXXX.yaml)
+TMP_KUBE_VIP=$(mktemp)
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo cat /etc/kubernetes/manifests/kube-vip.yaml" > "$TMP_KUBE_VIP"
 
 for NODE in node2 node3; do
@@ -542,50 +626,56 @@ info "Removing control-plane taints so all nodes can schedule workloads..."
 kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
 
 # ------------------------------------------------------------------------------
-# Step 21: Download Cilium helm chart
+# Step 21: Download Cilium Helm chart
 # ------------------------------------------------------------------------------
 step_header "21" "Download Cilium ${CILIUM_VERSION} Helm chart"
-if [ ! -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
-    info "Fetching cilium-${CILIUM_VERSION}.tgz..."
-    helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
+if [ -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
+    info "Cilium Helm chart already exists. Skipping download."
 else
-    info "cilium-${CILIUM_VERSION}.tgz already exists."
+    info "Pulling Cilium Helm chart from OCI registry..."
+    helm pull oci://quay.io/cilium/charts/cilium --version "${CILIUM_VERSION}"
+    success "Cilium Helm chart downloaded."
 fi
 
 # ------------------------------------------------------------------------------
-# Step 22: Generate cilium.yaml using helm template
+# Step 22: Template Cilium Helm chart into cilium.yaml
 # ------------------------------------------------------------------------------
-step_header "22" "Template Cilium Helm chart into cilium.yaml"
-helm template cilium "./cilium-${CILIUM_VERSION}.tgz" --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
-success "Rendered cilium.yaml."
+step_header "22" "Template Cilium Helm chart"
+info "Rendering cilium.yaml from values..."
+helm template cilium "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" \
+    --namespace kube-system \
+    -f "${SCRIPT_DIR}/cilium-deploy.yaml" > "${SCRIPT_DIR}/cilium.yaml"
+success "cilium.yaml templated successfully."
 
 # ------------------------------------------------------------------------------
-# Step 23: Apply cilium.yaml
+# Step 23: Apply Cilium manifest
 # ------------------------------------------------------------------------------
-step_header "23" "Apply Cilium manifest"
-kubectl apply -f ./cilium.yaml
+step_header "23" "Apply Cilium CNI"
+info "Applying cilium.yaml..."
+kubectl apply -f "${SCRIPT_DIR}/cilium.yaml"
+success "Cilium manifest applied."
 
 # ------------------------------------------------------------------------------
-# Step 24: Wait for Cilium status
+# Step 24: Wait for Cilium deployment readiness
 # ------------------------------------------------------------------------------
 step_header "24" "Wait for Cilium readiness"
-info "Running cilium status --wait until successful..."
+info "Waiting for Cilium daemonsets and deployments to become ready..."
 until cilium status --wait; do
-    warn "Cilium status timed out or exited before complete. Retrying in 5 seconds..."
+    warn "Cilium status check timed out or not ready yet. Retrying in 5 seconds..."
     sleep 5
 done
-success "Cilium is healthy and ready!"
+success "Cilium CNI is fully operational."
 
 # ------------------------------------------------------------------------------
-# Step 25: Check for all 3 nodes status Ready
+# Step 25: Check all 3 nodes are in Ready status
 # ------------------------------------------------------------------------------
-step_header "25" "Check all 3 nodes are in Ready status"
-info "Waiting for all nodes to report condition=Ready..."
+step_header "25" "Verify all cluster nodes are Ready"
+info "Waiting for all nodes to report condition Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
 
 # ------------------------------------------------------------------------------
-# Step 26: Apply dnsutils.yaml
+# Step 26: Apply dnsutils test pod
 # ------------------------------------------------------------------------------
 step_header "26" "Apply dnsutils test pod"
 kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
@@ -594,5 +684,5 @@ kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
 kubectl get pods -A
 
 echo -e "\n${GREEN}======================================================================${NC}"
-echo -e "${GREEN}==> Kubernetes HA Cluster setup completed successfully!${NC}"
+echo -e "${GREEN}==> Kubernetes HA Cluster on ${ENGINE_NAME} completed successfully!${NC}"
 echo -e "${GREEN}======================================================================${NC}"

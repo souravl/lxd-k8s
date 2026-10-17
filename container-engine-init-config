@@ -1,28 +1,27 @@
 config: {}
 networks:
 - config:
-    ipv4.address: 10.67.38.1/24
+    ipv4.address: ${BRIDGE_IPV4}/24
     ipv4.nat: "true"
-    ipv6.address: fd42:51e5:ef75:abeb::1/64
+    ipv6.address: ${BRIDGE_IPV6}/64
     ipv6.nat: "true"
   description: ""
-  name: lxdbr0
+  name: ${BRIDGE}
   type: bridge
   project: default
 storage_pools:
 - config:
-    source: /var/snap/lxd/common/lxd/storage-pools/default
+    source: ${STORAGE_POOL_DIR}
   description: ""
   name: default
   driver: dir
-storage_volumes: []
 profiles:
 - config: {}
-  description: Default LXD profile
+  description: Default profile
   devices:
     eth0:
       name: eth0
-      network: lxdbr0
+      network: ${BRIDGE}
       type: nic
     root:
       path: /
@@ -37,7 +36,5 @@ projects:
     features.profiles: "true"
     features.storage.buckets: "true"
     features.storage.volumes: "true"
-  description: Default LXD project
+  description: Default project
   name: default
-  storage: ""
-  network: ""

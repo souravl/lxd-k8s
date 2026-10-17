@@ -1,11 +1,14 @@
 #!/bin/bash
 set -e
 shopt -s expand_aliases
-export VIP=10.67.38.40
+export VIP="${VIP:-10.67.38.40}"
 export INTERFACE=eth0
-KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name")
+KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name" 2>/dev/null || true)
+if [ -z "$KVVERSION" ] || [ "$KVVERSION" = "null" ]; then
+    KVVERSION="v1.3.0"
+fi
 export KVVERSION
-alias kube-vip="ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION; ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip"
+alias kube-vip="sudo ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION; sudo ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip"
 sudo mkdir -p /etc/kubernetes/manifests
 kube-vip manifest pod \
     --interface $INTERFACE \
@@ -13,5 +16,6 @@ kube-vip manifest pod \
     --controlplane \
     --services \
     --arp \
-    --leaderElection | tee /etc/kubernetes/manifests/kube-vip.yaml
+    --leaderElection | sudo tee /etc/kubernetes/manifests/kube-vip.yaml >/dev/null
+
 

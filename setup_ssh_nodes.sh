@@ -1,16 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Determine container CLI command: use $CONTAINER_CMD if set, default to incus (fallback to lxc only if lxc is present and incus is not)
+if [ -n "${CONTAINER_CMD:-}" ]; then
+    CLI="$CONTAINER_CMD"
+elif command -v lxc >/dev/null 2>&1 && ! command -v incus >/dev/null 2>&1; then
+    CLI="lxc"
+else
+    CLI="incus"
+fi
+
 # Accept HOSTS_ENTRIES from command-line arguments, or fallback to default
 if [ "$#" -gt 0 ]; then
     HOSTS_ENTRIES=("$@")
 elif [ -n "${HOSTS_ENTRIES_ENV:-}" ]; then
     readarray -t HOSTS_ENTRIES <<< "$HOSTS_ENTRIES_ENV"
 else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "${SCRIPT_DIR}/inventory.txt" ]; then
+        # shellcheck source=/dev/null
+        source "${SCRIPT_DIR}/inventory.txt"
+    fi
+    NODE1_IP="${NODE1_IP:-10.67.38.87}"
+    NODE2_IP="${NODE2_IP:-10.67.38.221}"
+    NODE3_IP="${NODE3_IP:-10.67.38.211}"
     HOSTS_ENTRIES=(
-        "10.67.38.87 node1"
-        "10.67.38.221 node2"
-        "10.67.38.211 node3"
+        "${NODE1_IP} node1"
+        "${NODE2_IP} node2"
+        "${NODE3_IP} node3"
     )
 fi
 
@@ -21,7 +38,7 @@ else
     NODES=()
     for ENTRY in "${HOSTS_ENTRIES[@]}"; do
         NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
-        if incus info "$NODE_NAME" >/dev/null 2>&1; then
+        if "$CLI" info "$NODE_NAME" >/dev/null 2>&1; then
             NODES+=("$NODE_NAME")
         fi
     done
@@ -92,29 +109,29 @@ else
 fi
 echo "----------------------------------------"
 
-# 3. Process each Incus container
+# 3. Process each container
 for NODE in "${NODES[@]}"; do
     echo "[+] Configuring node: $NODE"
 
     # Check container existence
-    if ! incus info "$NODE" >/dev/null 2>&1; then
+    if ! "$CLI" info "$NODE" >/dev/null 2>&1; then
         echo "  [!] Warning: Container '$NODE' does not exist. Skipping..."
         echo "----------------------------------------"
         continue
     fi
 
     # Ensure container is running
-    STATE=$(incus info "$NODE" | awk '/^Status:/ {print $2}')
+    STATE=$("$CLI" info "$NODE" | awk '/^Status:/ {print $2}')
     if [ "$STATE" != "RUNNING" ]; then
         echo "  -> Starting container $NODE..."
-        incus start "$NODE"
+        "$CLI" start "$NODE"
     fi
 
     # Wait up to 30 seconds for DNS & network readiness
     MAX_WAIT=30
     COUNT=0
     echo "  -> Waiting for DNS & network readiness (timeout: ${MAX_WAIT}s)..."
-    until incus exec "$NODE" -- getent hosts archive.ubuntu.com >/dev/null 2>&1; do
+    until "$CLI" exec "$NODE" -- getent hosts archive.ubuntu.com >/dev/null 2>&1; do
         COUNT=$((COUNT + 1))
         if [ "$COUNT" -ge "$MAX_WAIT" ]; then
             echo "  [!] Error: DNS/Network timeout on container '$NODE' after ${MAX_WAIT}s. Aborting." >&2
@@ -124,37 +141,37 @@ for NODE in "${NODES[@]}"; do
     done
 
     # Create user '${USER}' if it doesn't exist
-    if ! incus exec "$NODE" -- id -u "${USER}" >/dev/null 2>&1; then
+    if ! "$CLI" exec "$NODE" -- id -u "${USER}" >/dev/null 2>&1; then
         echo "  -> Creating user '${USER}'..."
-        incus exec "$NODE" -- useradd -m -s /bin/bash "${USER}"
-        incus exec "$NODE" -- usermod -aG sudo "${USER}"
+        "$CLI" exec "$NODE" -- useradd -m -s /bin/bash "${USER}"
+        "$CLI" exec "$NODE" -- usermod -aG sudo "${USER}"
     else
         echo "  -> User '${USER}' already exists."
     fi
 
     # Set password for '${USER}'
     echo "  -> Setting password..."
-    echo "${USER}:$USER_PASS" | incus exec "$NODE" -- chpasswd
+    echo "${USER}:$USER_PASS" | "$CLI" exec "$NODE" -- chpasswd
 
     # Configure passwordless sudo for '${USER}'
     echo "  -> Configuring passwordless sudo..."
-    incus exec "$NODE" -- bash -c "mkdir -p /etc/sudoers.d && echo '${USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-${USER}"
-    incus exec "$NODE" -- chmod 440 "/etc/sudoers.d/90-${USER}"
+    "$CLI" exec "$NODE" -- bash -c "mkdir -p /etc/sudoers.d && echo '${USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-${USER}"
+    "$CLI" exec "$NODE" -- chmod 440 "/etc/sudoers.d/90-${USER}"
 
     # Set up SSH directory and authorized_keys
     echo "  -> Injecting SSH public key..."
-    incus exec "$NODE" -- mkdir -p "/home/${USER}/.ssh"
-    incus file push "$SSH_PUB_KEY" "$NODE/home/${USER}/.ssh/authorized_keys"
+    "$CLI" exec "$NODE" -- mkdir -p "/home/${USER}/.ssh"
+    "$CLI" file push "$SSH_PUB_KEY" "$NODE/home/${USER}/.ssh/authorized_keys"
 
     # Set strict permissions
-    incus exec "$NODE" -- chown -R "${USER}:${USER}" "/home/${USER}/.ssh"
-    incus exec "$NODE" -- chmod 700 "/home/${USER}/.ssh"
-    incus exec "$NODE" -- chmod 600 "/home/${USER}/.ssh/authorized_keys"
+    "$CLI" exec "$NODE" -- chown -R "${USER}:${USER}" "/home/${USER}/.ssh"
+    "$CLI" exec "$NODE" -- chmod 700 "/home/${USER}/.ssh"
+    "$CLI" exec "$NODE" -- chmod 600 "/home/${USER}/.ssh/authorized_keys"
 
     # Ensure OpenSSH server is installed and running
-    incus exec "$NODE" -- apt-get update -qq
-    incus exec "$NODE" -- apt-get install -y -qq openssh-server
-    incus exec "$NODE" -- systemctl enable --now ssh
+    "$CLI" exec "$NODE" -- apt-get update -qq
+    "$CLI" exec "$NODE" -- apt-get install -y -qq openssh-server
+    "$CLI" exec "$NODE" -- systemctl enable --now ssh
 
     echo "  [✓] $NODE successfully configured!"
     echo "----------------------------------------"
@@ -178,11 +195,11 @@ done
 # Update /etc/hosts inside all containers for inter-node communication
 echo "  -> Updating /etc/hosts inside containers..."
 for TARGET_NODE in "${NODES[@]}"; do
-    if incus info "$TARGET_NODE" >/dev/null 2>&1; then
+    if "$CLI" info "$TARGET_NODE" >/dev/null 2>&1; then
         for ENTRY in "${HOSTS_ENTRIES[@]}"; do
             IP=$(echo "$ENTRY" | awk '{print $1}')
             NODE=$(echo "$ENTRY" | awk '{print $2}')
-            incus exec "$TARGET_NODE" -- bash -c "sed -i -E '/[[:space:]]${NODE}([[:space:]]|$)/d' /etc/hosts && echo -e '${IP}\t${NODE}' >> /etc/hosts"
+            "$CLI" exec "$TARGET_NODE" -- bash -c "sed -i -E '/[[:space:]]${NODE}([[:space:]]|$)/d' /etc/hosts && echo -e '${IP}\t${NODE}' >> /etc/hosts"
         done
     fi
 done

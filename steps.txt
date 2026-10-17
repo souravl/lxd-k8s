@@ -1,15 +1,25 @@
 # ==============================================================================
-# High-Availability Kubernetes Cluster on LXD - Step-by-Step Guide
+# High-Availability Kubernetes Cluster on Incus or LXD - Step-by-Step Guide
 # Note: Add 'sudo' where needed. The user is expected to provide sudo password.
+# Static IP addresses (VIP, BRIDGE_IPV4, BRIDGE_IPV6, NODE1_IP, NODE2_IP, NODE3_IP), Ubuntu release
+# (UBUNTU_VERSION), and software versions (KUBERNETES_VERSION, CILIUM_VERSION)
+# are configured in 'inventory.txt'.
 # ==============================================================================
 
-1. Install LXD via snap:
-   sudo snap install lxd
+1. Install Container Engine:
+   - For Incus (Recommended default):
+     sudo apt-get install -y incus
+     (Ensure Zabbly repository is added if on standard Ubuntu 24.04)
+   - For LXD:
+     sudo snap install lxd
 
-2. Configure LXD group membership:
-   Make the current user a member of the 'lxd' group:
+2. Configure Group Membership:
+   - For Incus:
+     sudo usermod -aG incus-admin $USER
+     (Activate group in current shell without logout: sg incus-admin)
+   - For LXD:
      sudo usermod -aG lxd $USER
-   Ensure that from here onwards in the script, lxd/lxc commands do not require sudo (e.g. via 'sg lxd').
+     (Activate group in current shell without logout: sg lxd)
 
 3. Disable UFW on host machine if present:
    sudo ufw disable
@@ -38,23 +48,36 @@ EOF
    And load settings into the current host system:
      sudo sysctl --system
 
-6. Initialize LXD with preseed configuration:
-   lxd init --preseed < lxd-init-config
+6. Initialize container engine with preseed configuration:
+   - For Incus:
+     sed -e 's|\${BRIDGE}|incusbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/lib/incus/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config | incus admin init --preseed
+   - For LXD:
+     sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/snap/lxd/common/lxd/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config | lxd init --preseed
 
-7. Configure Docker and LXD iptables coexistence:
-   bash lxd_docker_iptables.sh
+7. Configure Docker and bridge iptables coexistence:
+   - For Incus:
+     bash docker_iptables.sh incusbr0
+   - For LXD:
+     bash docker_iptables.sh lxdbr0
 
-8. Create LXD profile 'k8s' from k8s-profile-config:
-   lxc profile create k8s < k8s-profile-config 2>/dev/null || true
-   lxc profile edit k8s < k8s-profile-config
+8. Create and configure container profile 'k8s':
+   - For Incus:
+     incus profile create k8s 2>/dev/null || true
+     sed -e 's|\${BRIDGE}|incusbr0|g' -e 's|\${LIMITS_CPU}|4|g' -e 's|\${LIMITS_MEMORY}|4GB|g' k8s-container-profile-config | incus profile edit k8s
+   - For LXD:
+     lxc profile create k8s 2>/dev/null || true
+     sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${LIMITS_CPU}|4|g' -e 's|\${LIMITS_MEMORY}|4GB|g' k8s-container-profile-config | lxc profile edit k8s
 
-9. Launch and start LXD container (node1):
-    lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
-    Ensure node1 is started:
-    lxc start node1
+9. Launch and start container (node1):
+   - For Incus:
+     incus launch images:ubuntu/24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
+     incus start node1
+   - For LXD:
+     lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
+     lxc start node1
 
 10. Run SSH setup script on node1:
-    bash setup_ssh_lxd_nodes.sh
+    TARGET_NODES="node1" bash setup_ssh_nodes.sh
 
 11. On node1:
     i)   SCP containerd_install.sh and kubeadm_install.sh to node1.
@@ -81,29 +104,44 @@ EOF
          sudo systemctl restart containerd
 
 12. Clone node2 and node3 from node1:
-    i)   Stop node1 and wait for it to reach STOPPED status:
-         lxc stop node1
-    ii)  Copy node2 and node3 from node1, and assign static IP addresses:
-         lxc copy node1 node2
-         lxc config device set node2 eth0 ipv4.address 10.67.38.221
-         lxc copy node1 node3
-         lxc config device set node3 eth0 ipv4.address 10.67.38.211
-    iii) Start all three containers:
-         lxc start node1
-         lxc start node2
-         lxc start node3
-    iv)  Set proper system hostnames and regenerate unique machine-ids:
-         lxc exec node2 -- bash -c "echo node2 > /etc/hostname && hostname node2"
-         lxc exec node2 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
-         lxc exec node3 -- bash -c "echo node3 > /etc/hostname && hostname node3"
-         lxc exec node3 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
-    v)   Verify SSH connectivity to all nodes.
+    - For Incus:
+      i)   Stop node1:
+           incus stop node1
+      ii)  Copy node2 and node3, assign static IP addresses:
+           incus copy node1 node2
+           incus config device set node2 eth0 ipv4.address 10.67.38.221
+           incus copy node1 node3
+           incus config device set node3 eth0 ipv4.address 10.67.38.211
+      iii) Start all three containers:
+           incus start node1 node2 node3
+      iv)  Set hostnames and regenerate unique machine-ids:
+           incus exec node2 -- bash -c "echo node2 > /etc/hostname && hostname node2"
+           incus exec node2 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+           incus exec node3 -- bash -c "echo node3 > /etc/hostname && hostname node3"
+           incus exec node3 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+      v)   Verify SSH connectivity to all nodes.
+
+    - For LXD:
+      i)   Stop node1:
+           lxc stop node1
+      ii)  Copy node2 and node3, assign static IP addresses:
+           lxc copy node1 node2
+           lxc config device set node2 eth0 ipv4.address 10.67.38.221
+           lxc copy node1 node3
+           lxc config device set node3 eth0 ipv4.address 10.67.38.211
+      iii) Start all three containers:
+           lxc start node1 node2 node3
+      iv)  Set hostnames and regenerate unique machine-ids:
+           lxc exec node2 -- bash -c "echo node2 > /etc/hostname && hostname node2"
+           lxc exec node2 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+           lxc exec node3 -- bash -c "echo node3 > /etc/hostname && hostname node3"
+           lxc exec node3 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+      v)   Verify SSH connectivity to all nodes.
 
 13. For node1 (Bootstrap Control Plane):
     i)    SCP kube-vip.sh and kubeadm-init-config.yaml to node1.
     ii)   Run kube-vip.sh.
     iii)  Temporarily update hostPath to super-admin.conf in kube-vip manifest:
-          # Match the line containing 'hostPath:', then replace 'admin.conf' on the next line
           sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
     iv)   Initialize control plane with kubeadm:
           sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification
@@ -155,7 +193,7 @@ EOF
       kubectl taint nodes --all node-role.kubernetes.io/control-plane-
     (Allows scheduling user and system workloads across all control plane nodes)
 
-21. Download Cilium Helm chart (uses $CILIUM_VERSION from software_install_version.txt):
+21. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
     helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
 
 22. Render Cilium deployment manifest:
