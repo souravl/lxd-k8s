@@ -8,7 +8,7 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 
 ### 1. Master Deployment Scripts
 - **[`deploy_k8s.sh`](deploy_k8s.sh) (LXD) & [`deploy_k8s_incus.sh`](deploy_k8s_incus.sh) (Incus)**
-  - Implements all 27 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
+  - Implements all 26 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
   - **Node Cloning Architecture (Steps 9-12)**: Launches and provisions only `node1` with containerd, kubeadm, and pause image pre-pulling, then stops `node1` and clones `node2` and `node3` via `lxc copy` / `incus copy`, assigns static IPs, sets hostnames directly (`echo ... > /etc/hostname && hostname ...`), regenerates machine IDs, and verifies SSH across all nodes.
   - **SSH Host Key Resilience**: Prunes stale keys from `$HOME/.ssh/known_hosts` on startup and sets `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)` so re-running after deleting and recreating containers never encounters `Host key verification failed`.
   - **Device Syntax**: Uses `-d eth0,ipv4.address="$IP"` (instead of `--config`) for static IP assignments on container launch.
@@ -28,7 +28,7 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
   - Added support for `CONTAINER_PASS` environment variable.
 - **[`steps.txt`](steps.txt) & [`steps_incus.txt`](steps_incus.txt)**:
   - Updated step 9 to reflect single container launch (`node1`).
-  - Added step 12 for container cloning workflow and renumbered subsequent steps through 27.
+  - Added step 12 for container cloning workflow and renumbered subsequent steps through 26.
 - **[`lxd_docker_iptables.sh`](lxd_docker_iptables.sh) & [`incus_docker_iptables.sh`](incus_docker_iptables.sh)**:
   - Added `DEBIAN_FRONTEND=noninteractive` to `sudo apt-get install -y iptables-persistent`.
 
@@ -64,7 +64,6 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 | **24** | Wait for Cilium | Loops `cilium status --wait` until ready. |
 | **25** | Verify nodes | Waits for all nodes to report condition `Ready` (`kubectl wait --for=condition=Ready nodes --all --timeout=300s`). |
 | **26** | Deploy dnsutils | Applies `dnsutils.yaml` and checks pod status. |
-| **27** | Update host /etc/hosts | Updates or adds static IP mappings for `node1`, `node2`, and `node3` in `/etc/hosts` on the host machine. |
 
 ---
 

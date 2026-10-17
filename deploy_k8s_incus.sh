@@ -216,7 +216,7 @@ fi
 # Step 10: Run setup_ssh_incus_nodes.sh for ssh setup
 # ------------------------------------------------------------------------------
 step_header "10" "Run setup_ssh_incus_nodes.sh on node1"
-bash "${SCRIPT_DIR}/setup_ssh_incus_nodes.sh" "${HOSTS_ENTRIES[@]}"
+TARGET_NODES="node1" bash "${SCRIPT_DIR}/setup_ssh_incus_nodes.sh" "${HOSTS_ENTRIES[@]}"
 
 # ------------------------------------------------------------------------------
 # Step 11: Configure containerd & kubeadm on node1
@@ -525,14 +525,27 @@ success "Kube-vip manifests distributed to all control plane nodes."
 # Step 19: Install cilium CLI, helm, and kubectl on host
 # ------------------------------------------------------------------------------
 step_header "19" "Install cilium CLI, Helm, and Kubectl on host"
-info "Running cilium_cli_install.sh..."
-bash "${SCRIPT_DIR}/cilium_cli_install.sh"
+if command -v cilium >/dev/null 2>&1; then
+    info "Cilium CLI is already installed ($(command -v cilium)). Skipping."
+else
+    info "Running cilium_cli_install.sh..."
+    bash "${SCRIPT_DIR}/cilium_cli_install.sh"
+fi
 
-info "Running helm_install.sh..."
-bash "${SCRIPT_DIR}/helm_install.sh"
+if command -v helm >/dev/null 2>&1; then
+    info "Helm is already installed ($(command -v helm)). Skipping."
+else
+    info "Running helm_install.sh..."
+    bash "${SCRIPT_DIR}/helm_install.sh"
+fi
 
-info "Running kubectl_install.sh..."
-bash "${SCRIPT_DIR}/kubectl_install.sh"
+if command -v kubectl >/dev/null 2>&1; then
+    info "Kubectl is already installed ($(command -v kubectl)). Skipping."
+else
+    info "Running kubectl_install.sh..."
+    bash "${SCRIPT_DIR}/kubectl_install.sh"
+fi
+success "Host tooling ready."
 
 # ------------------------------------------------------------------------------
 # Step 20: Remove control-plane taints from all nodes
@@ -592,24 +605,6 @@ kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
 kubectl get pods -A
-
-# ------------------------------------------------------------------------------
-# Step 27: Update /etc/hosts on host machine for cluster nodes
-# ------------------------------------------------------------------------------
-step_header "27" "Update /etc/hosts on host machine for cluster nodes"
-for ENTRY in "${HOSTS_ENTRIES[@]}"; do
-    IP=$(echo "$ENTRY" | awk '{print $1}')
-    NODE=$(echo "$ENTRY" | awk '{print $2}')
-
-    if grep -E -q "^[0-9a-fA-F.:]+[[:space:]]+([^#]*[[:space:]]|)${NODE}([[:space:]]|$)" /etc/hosts; then
-        info "Updating IP for $NODE to $IP in /etc/hosts..."
-        sudo sed -i -E "/^[0-9a-fA-F.:]+[[:space:]]+([^#]*[[:space:]]|)${NODE}([[:space:]]|$)/ s/^[0-9a-fA-F.:]+/${IP}/" /etc/hosts
-    else
-        info "Adding $NODE ($IP) to /etc/hosts..."
-        echo -e "${IP}\t${NODE}" | sudo tee -a /etc/hosts >/dev/null
-    fi
-done
-success "Host /etc/hosts updated for cluster nodes."
 
 echo -e "\n${GREEN}======================================================================${NC}"
 echo -e "${GREEN}==> Kubernetes HA Cluster on Incus completed successfully!${NC}"

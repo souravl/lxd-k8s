@@ -14,12 +14,24 @@ else
     )
 fi
 
-# Derive NODES list from HOSTS_ENTRIES
-NODES=()
-for ENTRY in "${HOSTS_ENTRIES[@]}"; do
-    NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
-    NODES+=("$NODE_NAME")
-done
+# Derive NODES list from TARGET_NODES if specified, else from existing containers in HOSTS_ENTRIES
+if [ -n "${TARGET_NODES:-}" ]; then
+    read -ra NODES <<< "$TARGET_NODES"
+else
+    NODES=()
+    for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+        NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
+        if lxc info "$NODE_NAME" >/dev/null 2>&1; then
+            NODES+=("$NODE_NAME")
+        fi
+    done
+    if [ "${#NODES[@]}" -eq 0 ]; then
+        for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+            NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
+            NODES+=("$NODE_NAME")
+        done
+    fi
+fi
 
 # 1. Locate Host SSH Public Key
 SSH_PUB_KEY=""

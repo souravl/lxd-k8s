@@ -1,6 +1,6 @@
 # Automated HA Kubernetes Deployment on LXD from Scratch
 
-Implement an end-to-end, idempotent master bash script (`deploy_k8s.sh`) to automate the 27-step deployment of a high-availability, multi-control-plane Kubernetes cluster with `kube-vip` virtual IP and `cilium` CNI on Ubuntu 24.04 LXD containers, along with hardening companion scripts.
+Implement an end-to-end, idempotent master bash script (`deploy_k8s.sh`) to automate the 26-step deployment of a high-availability, multi-control-plane Kubernetes cluster with `kube-vip` virtual IP and `cilium` CNI on Ubuntu 24.04 LXD containers, along with hardening companion scripts.
 
 ## User Review Required
 
@@ -17,7 +17,7 @@ Implement an end-to-end, idempotent master bash script (`deploy_k8s.sh`) to auto
 ### Core Deployment Script
 
 #### [NEW] [deploy_k8s.sh](deploy_k8s.sh)
-- Master orchestration script implementing all 27 steps sequentially with colorized logging, error handling (`set -euo pipefail`), and verification checks.
+- Master orchestration script implementing all 26 steps sequentially with colorized logging, error handling (`set -euo pipefail`), and verification checks.
 - Manages host prerequisites (UFW, kernel modules, sysctl).
 - Installs LXC (`apt`) and LXD (`snap`), handles `lxd` group activation without requiring user logout.
 - Preseeds LXD with `lxd-init-config`, runs Docker-LXD firewall script, and configures `k8s` profile.
