@@ -1,34 +1,35 @@
-# Walkthrough: HA Kubernetes Deployment Script on LXD
+# Walkthrough: HA Kubernetes Deployment Scripts on LXD & Incus
 
-We have automated and fully verified the deployment of a High-Availability, 3-node multi-master Kubernetes cluster on LXD containers with `kube-vip` and Cilium CNI by creating [`deploy_k8s.sh`](deploy_k8s.sh) and hardening all supporting repository scripts.
+We have automated and fully verified the deployment of a High-Availability, 3-node multi-master Kubernetes cluster on LXD and Incus containers with `kube-vip` and Cilium CNI by creating [`deploy_k8s.sh`](deploy_k8s.sh) and [`deploy_k8s_incus.sh`](deploy_k8s_incus.sh) and hardening all supporting repository scripts.
 
 ---
 
 ## Changes Made & Hardening Applied
 
-### 1. Master Deployment Script
-- **[`deploy_k8s.sh`](deploy_k8s.sh)**
+### 1. Master Deployment Scripts
+- **[`deploy_k8s.sh`](deploy_k8s.sh) (LXD) & [`deploy_k8s_incus.sh`](deploy_k8s_incus.sh) (Incus)**
   - Implements all 27 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
-  - **Node Cloning Architecture (Steps 9-12)**: Launches and provisions only `node1` with containerd, kubeadm, and pause image pre-pulling, then stops `node1` and clones `node2` and `node3` via `lxc copy`, assigns static IPs, sets hostnames directly (`echo ... > /etc/hostname && hostname ...`), regenerates machine IDs, and verifies SSH across all nodes.
+  - **Node Cloning Architecture (Steps 9-12)**: Launches and provisions only `node1` with containerd, kubeadm, and pause image pre-pulling, then stops `node1` and clones `node2` and `node3` via `lxc copy` / `incus copy`, assigns static IPs, sets hostnames directly (`echo ... > /etc/hostname && hostname ...`), regenerates machine IDs, and verifies SSH across all nodes.
   - **SSH Host Key Resilience**: Prunes stale keys from `$HOME/.ssh/known_hosts` on startup and sets `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)` so re-running after deleting and recreating containers never encounters `Host key verification failed`.
-  - **LXD Device Syntax**: Uses `-d eth0,ipv4.address="$IP"` (instead of `--config`) for static IP assignments on container launch.
-  - **Clean Networking**: Removed legacy `apt install lxc` to avoid spawning the unused `lxcbr0` bridge and extra `dnsmasq` service.
+  - **Device Syntax**: Uses `-d eth0,ipv4.address="$IP"` (instead of `--config`) for static IP assignments on container launch.
+  - **Clean Networking**: Avoids unused bridge generation or extraneous `dnsmasq` services.
   - **Idempotent Node1 Bootstrap**: Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
   - **Token Selection Filter**: Correctly filters `kubeadm token list` for tokens with `authentication,signing` usage (avoiding internal TTL proxy tokens created by `upload-certs`).
   - **SSHFS-Safe In-Place Edits**: Replaced `sed -i` on join config files with safe temp-file writing (`sed ... > tmp && cat tmp > file`), ensuring compatibility with SSHFS and FUSE mounts.
-  - Automatically handles in-session `lxd` group activation via `exec sg lxd`.
+  - Automatically handles in-session group activation via `exec sg lxd` or `exec sg incus-admin`.
 
 ### 2. Supporting Scripts Hardened
 - **[`kubeadm_install.sh`](kubeadm_install.sh)**:
   - Added `cri-tools` to the package installation list so `crictl` is always present on every node to inspect runtime containers when the API VIP is cycling.
-- **[`setup_ssh_lxd_nodes.sh`](setup_ssh_lxd_nodes.sh)**:
+- **[`setup_ssh_lxd_nodes.sh`](setup_ssh_lxd_nodes.sh) & [`setup_ssh_incus_nodes.sh`](setup_ssh_incus_nodes.sh)**:
   - Automatically prunes stale cluster host keys from `$HOME/.ssh/known_hosts`.
   - Uses `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null` during connectivity checks to prevent host verification failures on recreated containers.
   - Added an initial check for existing passwordless SSH access across all nodes. If SSH is already working, it skips the container configuration and password prompt entirely.
   - Added support for `CONTAINER_PASS` environment variable.
-- **[`steps.txt`](steps.txt)**:
-  - Updated step 9 to reflect `-d eth0,ipv4.address=...`.
-- **[`lxd_docker_iptables.sh`](lxd_docker_iptables.sh)**:
+- **[`steps.txt`](steps.txt) & [`steps_incus.txt`](steps_incus.txt)**:
+  - Updated step 9 to reflect single container launch (`node1`).
+  - Added step 12 for container cloning workflow and renumbered subsequent steps through 27.
+- **[`lxd_docker_iptables.sh`](lxd_docker_iptables.sh) & [`incus_docker_iptables.sh`](incus_docker_iptables.sh)**:
   - Added `DEBIAN_FRONTEND=noninteractive` to `sudo apt-get install -y iptables-persistent`.
 
 ---
@@ -37,18 +38,18 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 
 | Step | Action | Implementation Detail |
 |---|---|---|
-| **1** | Install LXD | Ensures `snapd` is present and runs `sudo snap install lxd`. |
-| **2** | Group & permissions | Adds `$USER` to `lxd` group and activates via `exec sg lxd` if not already active in current shell. |
+| **1** | Install Container Engine | Ensures `snapd` is present for LXD (`snap install lxd`) or configures Zabbly repo and installs Incus via APT. |
+| **2** | Group & permissions | Adds `$USER` to `lxd` or `incus-admin` group and activates via `exec sg` if not already active in current shell. |
 | **3** | UFW disable | Checks if `ufw` command is present and disables it (`sudo ufw disable`). |
 | **4** | Kernel modules | Writes `overlay`, `br_netfilter`, `nf_conntrack` to `/etc/modules-load.d/k8s.conf` and loads with `modprobe`. |
 | **5** | Sysctl config | Writes bridge netfilter and `ip_forward=1` to `/etc/sysctl.d/99-k8s.conf` and applies with `sysctl --system`. |
-| **6** | LXD initialization | Runs `cat lxd-init-config \| lxd init --preseed` (skips if bridge `lxdbr0` already configured). |
-| **7** | Docker-LXD firewall | Executes `bash lxd_docker_iptables.sh`. |
-| **8** | LXD `k8s` profile | Creates profile `k8s` and configures it with `lxc profile edit k8s < k8s-profile-config`. |
+| **6** | Engine initialization | Runs preseed initialization (`lxd init --preseed < lxd-init-config` or `incus admin init --preseed < incus-init-config`). |
+| **7** | Docker firewall coexistence | Executes `lxd_docker_iptables.sh` or `incus_docker_iptables.sh`. |
+| **8** | Container `k8s` profile | Creates profile `k8s` and configures it with `k8s-profile-config` or `k8s-profile-config-incus`. |
 | **9** | Launch node1 | Launches only `node1` (10.67.38.87) using profile `k8s` and `-d eth0,ipv4.address=10.67.38.87`. |
-| **10** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh "${HOSTS_ENTRIES[@]}"` to configure user, sudoers, and authorized keys on `node1`. |
+| **10** | SSH & node setup | Invokes `setup_ssh_lxd_nodes.sh` or `setup_ssh_incus_nodes.sh` to configure user, sudoers, and authorized keys on `node1`. |
 | **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh` on `node1` only, configures `config.toml`, and pulls pause image. |
-| **12** | Clone node2 & node3 | Stops `node1`, clones `node2` and `node3` via `lxc copy`, assigns their static IPs, starts all nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
+| **12** | Clone node2 & node3 | Stops `node1`, clones `node2` and `node3` (`lxc copy` / `incus copy`), assigns their static IPs, starts all nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
 | **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
 | **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
 | **15** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |

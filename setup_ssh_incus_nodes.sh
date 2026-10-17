@@ -39,10 +39,20 @@ fi
 echo "Using SSH public key: $SSH_PUB_KEY"
 echo "----------------------------------------"
 
+# Clean stale host keys from ~/.ssh/known_hosts for cluster nodes from previous runs
+if [ -f "$HOME/.ssh/known_hosts" ]; then
+    for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+        _IP=$(echo "$ENTRY" | awk '{print $1}')
+        _NODE=$(echo "$ENTRY" | awk '{print $2}')
+        ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$_NODE" >/dev/null 2>&1 || true
+        ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$_IP" >/dev/null 2>&1 || true
+    done
+fi
+
 # Check if passwordless SSH key authentication is already operational on all nodes
 ALL_SSH_OK=true
 for NODE in "${NODES[@]}"; do
-    if ! ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes -o ConnectTimeout=2 "${USER}@${NODE}" "true" 2>/dev/null; then
+    if ! ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=2 "${USER}@${NODE}" "true" 2>/dev/null; then
         ALL_SSH_OK=false
         break
     fi

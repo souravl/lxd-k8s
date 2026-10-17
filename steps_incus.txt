@@ -50,22 +50,17 @@ EOF
    incus profile create k8s < k8s-profile-config-incus 2>/dev/null || true
    incus profile edit k8s < k8s-profile-config-incus
 
-9. Launch and start 3 Incus containers (node1, node2, node3):
+9. Launch and start Incus container (node1):
     incus launch images:ubuntu/24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
-    incus launch images:ubuntu/24.04 node2 --profile k8s -d eth0,ipv4.address=10.67.38.221
-    incus launch images:ubuntu/24.04 node3 --profile k8s -d eth0,ipv4.address=10.67.38.211
-
-    Ensure all three containers are started:
+    Ensure node1 is started:
     incus start node1
-    incus start node2
-    incus start node3
 
-10. Run SSH setup script for Incus nodes:
+10. Run SSH setup script on node1:
     bash setup_ssh_incus_nodes.sh
 
-11. For all 3 nodes (node1, node2, node3):
-    i)   SCP containerd_install.sh and kubeadm_install.sh to the container.
-    ii)  SSH into the container.
+11. On node1:
+    i)   SCP containerd_install.sh and kubeadm_install.sh to node1.
+    ii)  SSH into node1.
     iii) Run containerd_install.sh (with sudo for appropriate commands).
     iv)  Generate default containerd configuration:
          sudo rm -rf /etc/containerd/config.toml
@@ -87,7 +82,26 @@ EOF
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
 
-12. For node1 (Bootstrap Control Plane):
+12. Clone node2 and node3 from node1:
+    i)   Stop node1 and wait for it to reach STOPPED status:
+         incus stop node1
+    ii)  Copy node2 and node3 from node1, and assign static IP addresses:
+         incus copy node1 node2
+         incus config device set node2 eth0 ipv4.address 10.67.38.221
+         incus copy node1 node3
+         incus config device set node3 eth0 ipv4.address 10.67.38.211
+    iii) Start all three containers:
+         incus start node1
+         incus start node2
+         incus start node3
+    iv)  Set proper system hostnames and regenerate unique machine-ids:
+         incus exec node2 -- bash -c "echo node2 > /etc/hostname && hostname node2"
+         incus exec node2 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+         incus exec node3 -- bash -c "echo node3 > /etc/hostname && hostname node3"
+         incus exec node3 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+    v)   Verify SSH connectivity to all nodes.
+
+13. For node1 (Bootstrap Control Plane):
     i)    SCP kube-vip.sh and kubeadm-init-config.yaml to node1.
     ii)   Run kube-vip.sh.
     iii)  Temporarily update hostPath to super-admin.conf in kube-vip manifest:
@@ -109,59 +123,59 @@ EOF
     xii)  Verify kube-vip pod is recreated and ready.
     xiii) Exit out of node1 back to host machine.
 
-13. Copy Kubernetes admin config from node1 to host machine:
+14. Copy Kubernetes admin config from node1 to host machine:
     Copy /home/$USER/.kube/config from node1 to $HOME/.kube/config on the host machine so kubectl can be used from the host.
 
-14. Update join configuration files on host:
-    Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with the values noted in step 12.v (token, caCertHashes, certificateKey).
+15. Update join configuration files on host:
+    Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
 
-15. For node2 (Join Control Plane):
+16. For node2 (Join Control Plane):
     i)   SCP modified kubeadm-join-cp2-config.yaml to node2.
     ii)  Run:
          sudo kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification
     iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
     iv)  Exit out of node2 back to host machine.
 
-16. For node3 (Join Control Plane):
+17. For node3 (Join Control Plane):
     i)   SCP modified kubeadm-join-cp3-config.yaml to node3.
     ii)  Run:
          sudo kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification
     iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
     iv)  Exit out of node3 back to host machine.
 
-17. Distribute kube-vip manifest:
+18. Distribute kube-vip manifest:
     Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on both node2 and node3.
 
-18. Install host tools:
+19. Install host tools:
     On the host machine, run:
       bash cilium_cli_install.sh
       bash helm_install.sh
       bash kubectl_install.sh
 
-19. Remove control-plane taints from all nodes:
+20. Remove control-plane taints from all nodes:
     Run on host:
       kubectl taint nodes --all node-role.kubernetes.io/control-plane-
     (Allows scheduling user and system workloads across all control plane nodes)
 
-20. Download Cilium Helm chart (uses $CILIUM_VERSION from software_install_version.txt):
+21. Download Cilium Helm chart (uses $CILIUM_VERSION from software_install_version.txt):
     helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
 
-21. Render Cilium deployment manifest:
+22. Render Cilium deployment manifest:
     helm template cilium ./cilium-${CILIUM_VERSION}.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 
-22. Apply Cilium CNI to the cluster:
+23. Apply Cilium CNI to the cluster:
     kubectl apply -f ./cilium.yaml
 
-23. Wait for Cilium deployment readiness:
+24. Wait for Cilium deployment readiness:
     Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
 
-24. Verify all nodes reach 'Ready' status:
+25. Verify all nodes reach 'Ready' status:
     Check that all 3 nodes (node1, node2, node3) report condition Ready:
       kubectl get nodes -o wide
 
-25. Deploy test workload:
+26. Deploy test workload:
     kubectl apply -f dnsutils.yaml
     Verify cluster networking and DNS resolution.
 
-26. Update /etc/hosts on host machine:
+27. Update /etc/hosts on host machine:
     Update or append static IP mappings for cluster nodes (node1, node2, node3) in the host's /etc/hosts.
