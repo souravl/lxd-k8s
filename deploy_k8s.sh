@@ -141,17 +141,18 @@ info "Selected container engine: ${ENGINE_NAME} (CLI: ${CONTAINER_CMD})"
 # ------------------------------------------------------------------------------
 # Step 1: Install container engine on host
 # ------------------------------------------------------------------------------
-step_header "1" "Install ${ENGINE_NAME} on host"
-if [ "$ENGINE" = "incus" ]; then
-    if ! command -v incus >/dev/null 2>&1; then
-        info "Installing Incus via APT..."
-        if ! apt-cache show incus >/dev/null 2>&1; then
-            info "Adding Zabbly Incus repository..."
-            sudo apt-get update -qq
-            sudo apt-get install -y -qq curl ca-certificates
-            sudo mkdir -p /etc/apt/keyrings
-            sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
-            sudo sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+if [ "${_SKIP_STEP1:-false}" != "true" ]; then
+    step_header "1" "Install ${ENGINE_NAME} on host"
+    if [ "$ENGINE" = "incus" ]; then
+        if ! command -v incus >/dev/null 2>&1; then
+            info "Installing Incus via APT..."
+            if ! apt-cache show incus >/dev/null 2>&1; then
+                info "Adding Zabbly Incus repository..."
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq curl ca-certificates
+                sudo mkdir -p /etc/apt/keyrings
+                sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+                sudo sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
 Enabled: yes
 Types: deb
 URIs: https://pkgs.zabbly.com/incus/stable
@@ -160,38 +161,41 @@ Components: main
 Architectures: $(dpkg --print-architecture)
 Signed-By: /etc/apt/keyrings/zabbly.asc
 EOF'
-            sudo apt-get update -qq
+                sudo apt-get update -qq
+            fi
+            sudo apt-get install -y incus
+        else
+            info "Incus is already installed."
         fi
-        sudo apt-get install -y incus
     else
-        info "Incus is already installed."
-    fi
-else
-    if ! command -v snap >/dev/null 2>&1; then
-        info "Installing snapd..."
-        sudo apt-get install -y snapd
-    fi
-    if ! snap list lxd >/dev/null 2>&1; then
-        info "Installing lxd via snap..."
-        sudo snap install lxd
-    else
-        info "LXD snap is already installed."
+        if ! command -v snap >/dev/null 2>&1; then
+            info "Installing snapd..."
+            sudo apt-get install -y snapd
+        fi
+        if ! snap list lxd >/dev/null 2>&1; then
+            info "Installing lxd via snap..."
+            sudo snap install lxd
+        else
+            info "LXD snap is already installed."
+        fi
     fi
 fi
 
 # ------------------------------------------------------------------------------
 # Step 2: Configure group membership for $SSH_USER; ensure commands run without sudo
 # ------------------------------------------------------------------------------
-step_header "2" "Configure ${ENGINE_NAME} group membership for $SSH_USER"
-if ! id -nG "$SSH_USER" | grep -qw "$GROUP"; then
-    info "Adding $SSH_USER to group '$GROUP'..."
-    sudo usermod -aG "$GROUP" "$SSH_USER"
+if [ "${_SKIP_STEP1:-false}" != "true" ]; then
+    step_header "2" "Configure ${ENGINE_NAME} group membership for $SSH_USER"
+    if ! id -nG "$SSH_USER" | grep -qw "$GROUP"; then
+        info "Adding $SSH_USER to group '$GROUP'..."
+        sudo usermod -aG "$GROUP" "$SSH_USER"
+    fi
 fi
 
 # If group is not in current shell's active groups, re-execute the script using sg
 if ! id -nG | grep -qw "$GROUP"; then
     info "Activating '$GROUP' group for the current session without requiring logout..."
-    exec sg "$GROUP" -c "${SCRIPT_DIR}/deploy_k8s.sh -c $ENGINE"
+    exec sg "$GROUP" -c "_SKIP_STEP1=true \"${SCRIPT_DIR}/deploy_k8s.sh\" -c \"$ENGINE\""
 fi
 success "User $SSH_USER is in $GROUP group and $CONTAINER_CMD commands can run without sudo."
 
