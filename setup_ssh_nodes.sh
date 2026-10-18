@@ -21,9 +21,10 @@ else
         # shellcheck source=/dev/null
         source "${SCRIPT_DIR}/inventory.txt"
     fi
-    NODE1_IP="${NODE1_IP:-10.67.38.87}"
-    NODE2_IP="${NODE2_IP:-10.67.38.221}"
-    NODE3_IP="${NODE3_IP:-10.67.38.211}"
+    if [ -z "${NODE1_IP:-}" ] || [ -z "${NODE2_IP:-}" ] || [ -z "${NODE3_IP:-}" ]; then
+        echo "[ERROR] Missing node static IP addresses in inventory.txt! NODE1_IP, NODE2_IP, and NODE3_IP must all be set." >&2
+        exit 1
+    fi
     HOSTS_ENTRIES=(
         "${NODE1_IP} node1"
         "${NODE2_IP} node2"

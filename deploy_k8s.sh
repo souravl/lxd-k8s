@@ -80,9 +80,10 @@ export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
 VIP="${VIP:-10.67.38.40}"
 BRIDGE_IPV4="${BRIDGE_IPV4:-10.67.38.1}"
 BRIDGE_IPV6="${BRIDGE_IPV6:-fd42:51e5:ef75:abeb::1}"
-NODE1_IP="${NODE1_IP:-10.67.38.87}"
-NODE2_IP="${NODE2_IP:-10.67.38.221}"
-NODE3_IP="${NODE3_IP:-10.67.38.211}"
+if [ -z "${NODE1_IP:-}" ] || [ -z "${NODE2_IP:-}" ] || [ -z "${NODE3_IP:-}" ]; then
+    error "Missing node static IP addresses in inventory.txt! NODE1_IP, NODE2_IP, and NODE3_IP must all be set."
+    exit 1
+fi
 LIMITS_CPU="${LIMITS_CPU:-4}"
 LIMITS_MEMORY="${LIMITS_MEMORY:-4GB}"
 

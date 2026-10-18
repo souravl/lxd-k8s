@@ -36,9 +36,9 @@ BRIDGE_IPV4="10.67.38.1"
 BRIDGE_IPV6="fd42:51e5:ef75:abeb::1"
 
 # Node Static IP Addresses
-NODE1_IP="10.67.38.87"
-NODE2_IP="10.67.38.221"
-NODE3_IP="10.67.38.211"
+NODE1_IP="10.67.38.10"
+NODE2_IP="10.67.38.20"
+NODE3_IP="10.67.38.30"
 
 # Container Resource Limits
 LIMITS_CPU="4"
