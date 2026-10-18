@@ -13,12 +13,7 @@ apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
 apiServer:
   certSANs:
-    - 127.0.0.1
-    - localhost
-    - ${VIP}
-    - ${NODE1_IP}
-    - ${NODE2_IP}
-    - ${NODE3_IP}
+${CERT_SANS}
 networking:
   podSubnet: 10.244.0.0/16
   serviceSubnet: 10.96.0.0/16

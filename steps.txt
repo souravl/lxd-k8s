@@ -199,7 +199,7 @@ EOF
           sudo mkdir -p /etc/kubernetes/manifests
           sudo ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip manifest pod \
               --interface eth0 \
-              --address 10.67.38.40 \
+              --address 10.67.38.250 \
               --controlplane \
               --services \
               --arp \
@@ -209,7 +209,7 @@ EOF
     iv)   Initialize control plane with kubeadm:
           sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs --ignore-preflight-errors=SystemVerification
     v)    Note the token, discovery-token-ca-cert-hash, and certificate-key from the command output, e.g.:
-          kubeadm join 10.67.38.40:6443 --token <TOKEN> \
+          kubeadm join 10.67.38.250:6443 --token <TOKEN> \
               --discovery-token-ca-cert-hash sha256:<HASH> \
               --control-plane --certificate-key <CERT_KEY>
     vi)   Copy /etc/kubernetes/admin.conf to $HOME/.kube/config (as instructed by the command output).

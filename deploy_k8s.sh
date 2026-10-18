@@ -695,14 +695,21 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "VIP='${VIP}' bash -s" <<'EOF'
     sudo sed -i "s|path: /etc/kubernetes/admin.conf|path: /etc/kubernetes/super-admin.conf|g" /etc/kubernetes/manifests/kube-vip.yaml
 EOF
 
+# Generate dynamic certSANs list for all control plane nodes (1 .. NUM_CP)
+info "Generating dynamic certSANs list for ${NUM_CP} control plane node(s)..."
+CERT_SANS_BLOCK=$(printf "    - 127.0.0.1\n    - localhost\n    - %s" "$VIP")
+for ((i=1; i<=NUM_CP; i++)); do
+    var="NODE${i}_IP"
+    CERT_SANS_BLOCK=$(printf "%s\n    - %s\n    - node%d" "$CERT_SANS_BLOCK" "${!var}" "$i")
+done
+
 # Copy parameterized kubeadm-init-config.yaml to node1
 info "Copying parameterized kubeadm-init-config.yaml to node1..."
-sed \
-    -e "s|\${NODE1_IP}|${NODE1_IP}|g" \
-    -e "s|\${NODE2_IP}|${NODE2_IP}|g" \
-    -e "s|\${NODE3_IP}|${NODE3_IP}|g" \
-    -e "s|\${VIP}|${VIP}|g" \
-    "${SCRIPT_DIR}/kubeadm-init-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "cat > ~/kubeadm-init-config.yaml"
+INIT_CONFIG=$(< "${SCRIPT_DIR}/kubeadm-init-config.yaml")
+INIT_CONFIG="${INIT_CONFIG//\$\{NODE1_IP\}/$NODE1_IP}"
+INIT_CONFIG="${INIT_CONFIG//\$\{VIP\}/$VIP}"
+INIT_CONFIG="${INIT_CONFIG//\$\{CERT_SANS\}/$CERT_SANS_BLOCK}"
+echo "$INIT_CONFIG" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "cat > ~/kubeadm-init-config.yaml"
 
 # Run kubeadm init (with idempotency guard)
 info "Executing kubeadm init on node1..."
