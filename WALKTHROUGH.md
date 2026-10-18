@@ -98,47 +98,55 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c incus
 
 The script was executed and validated inside an isolated Ubuntu 24.04 KVM VM (`test-k8s`):
 
-### 1. Nodes Status
+### 1. Nodes Status (5-Node Cluster: 3 Control Planes + 2 Dedicated Workers)
 ```text
-NAME    STATUS   ROLES           AGE     VERSION   INTERNAL-IP    EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION              CONTAINER-RUNTIME
-node1   Ready    control-plane   35m     v1.37.1   10.67.38.87    <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.1
-node2   Ready    control-plane   5m47s   v1.37.1   10.67.38.221   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.1
-node3   Ready    control-plane   5m35s   v1.37.1   10.67.38.211   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.1
+NAME    STATUS   ROLES           AGE     VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION              CONTAINER-RUNTIME
+node1   Ready    control-plane   5m42s   v1.37.1   10.67.38.10   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.2
+node2   Ready    control-plane   5m6s    v1.37.1   10.67.38.20   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.2
+node3   Ready    control-plane   4m51s   v1.37.1   10.67.38.30   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.2
+node4   Ready    <none>          4m48s   v1.37.1   10.67.38.40   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.2
+node5   Ready    <none>          4m47s   v1.37.1   10.67.38.50   <none>        Ubuntu 24.04.5 LTS   6.8.0-142-generic (amd64)   containerd://2.4.2
 ```
 
 ### 2. Pods Status
 ```text
-NAMESPACE     NAME                               READY   STATUS    RESTARTS   AGE
-default       dnsutils                           1/1     Running   0          2m24s
-kube-system   cilium-27j65                       1/1     Running   0          6m31s
-kube-system   cilium-4dxcr                       1/1     Running   0          6m31s
-kube-system   cilium-4qc6t                       1/1     Running   0          6m31s
-kube-system   cilium-envoy-9cxrh                 1/1     Running   0          6m31s
-kube-system   cilium-envoy-lbxls                 1/1     Running   0          6m31s
-kube-system   cilium-envoy-t7z2t                 1/1     Running   0          6m31s
-kube-system   cilium-operator-7f69674786-fmw8x   1/1     Running   0          6m31s
-kube-system   cilium-operator-7f69674786-qw7cx   1/1     Running   0          6m31s
-kube-system   coredns-559f6c778d-gkkpf           1/1     Running   0          36m
-kube-system   coredns-559f6c778d-trnvn           1/1     Running   0          36m
-kube-system   etcd-node1                         1/1     Running   0          36m
-kube-system   etcd-node2                         1/1     Running   0          7m22s
-kube-system   etcd-node3                         1/1     Running   0          7m11s
-kube-system   hubble-relay-7989949c9c-z47d7      1/1     Running   0          6m31s
-kube-system   hubble-ui-85fcdb8cd4-pk577         2/2     Running   0          6m31s
-kube-system   kube-apiserver-node1               1/1     Running   0          36m
-kube-system   kube-apiserver-node2               1/1     Running   0          7m22s
-kube-system   kube-apiserver-node3               1/1     Running   0          7m11s
-kube-system   kube-controller-manager-node1      1/1     Running   0          36m
-kube-system   kube-controller-manager-node2      1/1     Running   0          7m22s
-kube-system   kube-controller-manager-node3      1/1     Running   0          7m11s
-kube-system   kube-proxy-2w7qd                   1/1     Running   0          7m23s
-kube-system   kube-proxy-dt4d2                   1/1     Running   0          7m11s
-kube-system   kube-proxy-l849c                   1/1     Running   0          36m
-kube-system   kube-scheduler-node1               1/1     Running   0          36m
-kube-system   kube-scheduler-node2               1/1     Running   0          7m22s
-kube-system   kube-scheduler-node3               1/1     Running   0          7m11s
-kube-system   kube-vip-node1                     1/1     Running   0          7m30s
-kube-system   kube-vip-node2                     1/1     Running   0          7m10s
-kube-system   kube-vip-node3                     1/1     Running   0          7m9s
+NAMESPACE     NAME                              READY   STATUS    RESTARTS   AGE
+default       dnsutils                          1/1     Running   0          7s
+kube-system   cilium-228lq                      1/1     Running   0          4m15s
+kube-system   cilium-7mzvj                      1/1     Running   0          4m15s
+kube-system   cilium-envoy-4jqbm                1/1     Running   0          4m15s
+kube-system   cilium-envoy-4pnm6                1/1     Running   0          4m15s
+kube-system   cilium-envoy-bw2xw                1/1     Running   0          4m15s
+kube-system   cilium-envoy-cxh26                1/1     Running   0          4m15s
+kube-system   cilium-envoy-zg8bn                1/1     Running   0          4m15s
+kube-system   cilium-n45l2                      1/1     Running   0          4m15s
+kube-system   cilium-operator-649867d84-4chvc   1/1     Running   0          4m15s
+kube-system   cilium-operator-649867d84-hn5rp   1/1     Running   0          4m15s
+kube-system   cilium-qp9nc                      1/1     Running   0          4m15s
+kube-system   cilium-vwph4                      1/1     Running   0          4m15s
+kube-system   coredns-559f6c778d-9vmkl          1/1     Running   0          5m29s
+kube-system   coredns-559f6c778d-xbss9          1/1     Running   0          5m29s
+kube-system   etcd-node1                        1/1     Running   0          5m47s
+kube-system   etcd-node2                        1/1     Running   0          5m10s
+kube-system   etcd-node3                        1/1     Running   0          4m56s
+kube-system   hubble-relay-856fb9b979-52gd6     1/1     Running   0          4m15s
+kube-system   hubble-ui-6dcdfb579c-rmm7w        2/2     Running   0          4m15s
+kube-system   kube-apiserver-node1              1/1     Running   0          5m47s
+kube-system   kube-apiserver-node2              1/1     Running   0          5m10s
+kube-system   kube-apiserver-node3              1/1     Running   0          4m56s
+kube-system   kube-controller-manager-node1     1/1     Running   0          5m47s
+kube-system   kube-controller-manager-node2     1/1     Running   0          5m10s
+kube-system   kube-controller-manager-node3     1/1     Running   0          4m56s
+kube-system   kube-proxy-4sfxl                  1/1     Running   0          4m55s
+kube-system   kube-proxy-6c2qg                  1/1     Running   0          4m54s
+kube-system   kube-proxy-hbf5b                  1/1     Running   0          4m58s
+kube-system   kube-proxy-nw2xj                  1/1     Running   0          5m29s
+kube-system   kube-proxy-xdckl                  1/1     Running   0          5m13s
+kube-system   kube-scheduler-node1              1/1     Running   0          5m47s
+kube-system   kube-scheduler-node2              1/1     Running   0          5m10s
+kube-system   kube-scheduler-node3              1/1     Running   0          4m56s
+kube-system   kube-vip-node1                    1/1     Running   2          5m47s
+kube-system   kube-vip-node2                    1/1     Running   0          4m57s
+kube-system   kube-vip-node3                    1/1     Running   0          4m56s
 ```
-All static control plane pods, `kube-vip`, Cilium CNI, CoreDNS, and test workload `dnsutils` are 100% Ready and Running.
+All static control plane pods, `kube-vip` Virtual IP failover pods, Cilium CNI DaemonSets across all 5 nodes, CoreDNS, Hubble relay & UI, and test workload `dnsutils` are 100% Ready and Running across both Incus and LXD deployments.
