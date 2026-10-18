@@ -28,6 +28,10 @@ Initial inspiration for this project came from [justmeandopensource/kubernetes (
 ### 1. Cluster Inventory Configuration
 Configure node static IP addresses, Ubuntu OS version, and software versions in `inventory.txt`:
 ```bash
+# Number of Control Plane & Worker Nodes
+NUM_CP=3
+NUM_WORKER=2
+
 # Virtual IP (kube-vip control plane endpoint)
 VIP="10.67.38.40"
 
@@ -36,9 +40,14 @@ BRIDGE_IPV4="10.67.38.1"
 BRIDGE_IPV6="fd42:51e5:ef75:abeb::1"
 
 # Node Static IP Addresses
+# Control Plane Nodes (1 .. NUM_CP)
 NODE1_IP="10.67.38.10"
 NODE2_IP="10.67.38.20"
 NODE3_IP="10.67.38.30"
+
+# Worker Nodes ((NUM_CP + 1) .. (NUM_CP + NUM_WORKER))
+NODE4_IP="10.67.38.40"
+NODE5_IP="10.67.38.50"
 
 # Container Resource Limits
 LIMITS_CPU="4"

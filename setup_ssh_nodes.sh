@@ -21,9 +21,44 @@ else
         # shellcheck source=/dev/null
         source "${SCRIPT_DIR}/inventory.txt"
     fi
-    if [ -z "${NODE1_IP:-}" ] || [ -z "${NODE2_IP:-}" ] || [ -z "${NODE3_IP:-}" ]; then
-        echo "[ERROR] Missing node static IP addresses in inventory.txt! NODE1_IP, NODE2_IP, and NODE3_IP must all be set." >&2
+    NUM_CP="${NUM_CP:-3}"
+    NUM_WORKER="${NUM_WORKER:-0}"
+    TOTAL_NODES=$((NUM_CP + NUM_WORKER))
+    NODE_IPS_COUNT=0
+    for var in ${!NODE*}; do
+        if [[ "$var" =~ ^NODE[0-9]+_IP$ ]] && [ -n "${!var:-}" ]; then
+            NODE_IPS_COUNT=$((NODE_IPS_COUNT + 1))
+        fi
+    done
+    if [ "$NODE_IPS_COUNT" -lt "$TOTAL_NODES" ]; then
+        echo "[ERROR] Insufficient node static IP addresses in inventory.txt! Expected at least ${TOTAL_NODES} NODEn_IP variable(s) (${NUM_CP} control plane + ${NUM_WORKER} worker), but found ${NODE_IPS_COUNT}." >&2
         exit 1
+    fi
+    MISSING_CP_NODES=()
+    for ((i=1; i<=NUM_CP; i++)); do
+        var="NODE${i}_IP"
+        if [ -z "${!var:-}" ]; then
+            MISSING_CP_NODES+=("$var")
+        fi
+    done
+    if [ "${#MISSING_CP_NODES[@]}" -gt 0 ]; then
+        echo "[ERROR] Missing control plane node static IP addresses in inventory.txt! The following required variable(s) are not set: ${MISSING_CP_NODES[*]}." >&2
+        exit 1
+    fi
+    if [ "$NUM_WORKER" -gt 0 ]; then
+        START_WORKER=$((NUM_CP + 1))
+        END_WORKER=$((NUM_CP + NUM_WORKER))
+        MISSING_WORKER_NODES=()
+        for ((i=START_WORKER; i<=END_WORKER; i++)); do
+            var="NODE${i}_IP"
+            if [ -z "${!var:-}" ]; then
+                MISSING_WORKER_NODES+=("$var")
+            fi
+        done
+        if [ "${#MISSING_WORKER_NODES[@]}" -gt 0 ]; then
+            echo "[ERROR] Missing worker node static IP addresses in inventory.txt! Expected ${NUM_WORKER} sequential worker node(s) (NODE${START_WORKER}_IP to NODE${END_WORKER}_IP). The following required variable(s) are not set: ${MISSING_WORKER_NODES[*]}." >&2
+            exit 1
+        fi
     fi
     HOSTS_ENTRIES=(
         "${NODE1_IP} node1"

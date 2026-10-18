@@ -80,9 +80,64 @@ export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
 VIP="${VIP:-10.67.38.40}"
 BRIDGE_IPV4="${BRIDGE_IPV4:-10.67.38.1}"
 BRIDGE_IPV6="${BRIDGE_IPV6:-fd42:51e5:ef75:abeb::1}"
-if [ -z "${NODE1_IP:-}" ] || [ -z "${NODE2_IP:-}" ] || [ -z "${NODE3_IP:-}" ]; then
-    error "Missing node static IP addresses in inventory.txt! NODE1_IP, NODE2_IP, and NODE3_IP must all be set."
+# Verify NUM_CP and NUM_WORKER
+NUM_CP="${NUM_CP:-3}"
+if ! [[ "$NUM_CP" =~ ^[1-9][0-9]*$ ]]; then
+    error "Invalid NUM_CP='${NUM_CP}' in inventory.txt! NUM_CP must be a positive integer."
     exit 1
+fi
+
+NUM_WORKER="${NUM_WORKER:-0}"
+if ! [[ "$NUM_WORKER" =~ ^[0-9]+$ ]]; then
+    error "Invalid NUM_WORKER='${NUM_WORKER}' in inventory.txt! NUM_WORKER must be a non-negative integer."
+    exit 1
+fi
+
+TOTAL_NODES=$((NUM_CP + NUM_WORKER))
+
+# Count defined and non-empty NODEn_IP variables
+NODE_IPS_COUNT=0
+for var in ${!NODE*}; do
+    if [[ "$var" =~ ^NODE[0-9]+_IP$ ]] && [ -n "${!var:-}" ]; then
+        NODE_IPS_COUNT=$((NODE_IPS_COUNT + 1))
+    fi
+done
+
+if [ "$NODE_IPS_COUNT" -lt "$TOTAL_NODES" ]; then
+    error "Insufficient node static IP addresses in inventory.txt! Expected at least ${TOTAL_NODES} NODEn_IP variable(s) (${NUM_CP} control plane + ${NUM_WORKER} worker), but found ${NODE_IPS_COUNT}."
+    exit 1
+fi
+
+# Verify control plane node static IP addresses (NODE1_IP .. NODEn_IP for CPs)
+MISSING_CP_NODES=()
+for ((i=1; i<=NUM_CP; i++)); do
+    var="NODE${i}_IP"
+    if [ -z "${!var:-}" ]; then
+        MISSING_CP_NODES+=("$var")
+    fi
+done
+
+if [ "${#MISSING_CP_NODES[@]}" -gt 0 ]; then
+    error "Missing control plane node static IP addresses in inventory.txt! The following required variable(s) are not set: ${MISSING_CP_NODES[*]}."
+    exit 1
+fi
+
+# Verify worker node static IP addresses (sequential starting after last CP node)
+if [ "$NUM_WORKER" -gt 0 ]; then
+    START_WORKER=$((NUM_CP + 1))
+    END_WORKER=$((NUM_CP + NUM_WORKER))
+    MISSING_WORKER_NODES=()
+    for ((i=START_WORKER; i<=END_WORKER; i++)); do
+        var="NODE${i}_IP"
+        if [ -z "${!var:-}" ]; then
+            MISSING_WORKER_NODES+=("$var")
+        fi
+    done
+
+    if [ "${#MISSING_WORKER_NODES[@]}" -gt 0 ]; then
+        error "Missing worker node static IP addresses in inventory.txt! Expected ${NUM_WORKER} sequential worker node(s) (NODE${START_WORKER}_IP to NODE${END_WORKER}_IP). The following required variable(s) are not set: ${MISSING_WORKER_NODES[*]}."
+        exit 1
+    fi
 fi
 LIMITS_CPU="${LIMITS_CPU:-4}"
 LIMITS_MEMORY="${LIMITS_MEMORY:-4GB}"
