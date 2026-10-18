@@ -167,11 +167,11 @@ SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)
 
 # Static IP to node mappings (passed to setup_ssh_nodes.sh)
-HOSTS_ENTRIES=(
-    "${NODE1_IP} node1"
-    "${NODE2_IP} node2"
-    "${NODE3_IP} node3"
-)
+HOSTS_ENTRIES=()
+for ((i=1; i<=TOTAL_NODES; i++)); do
+    var="NODE${i}_IP"
+    HOSTS_ENTRIES+=("${!var} node${i}")
+done
 
 NODES=()
 declare -A NODE_IPS
@@ -180,6 +180,12 @@ for ENTRY in "${HOSTS_ENTRIES[@]}"; do
     NODE=$(echo "$ENTRY" | awk '{print $2}')
     NODES+=("$NODE")
     NODE_IPS["$NODE"]="$IP"
+done
+
+# Nodes to clone from node1 (node2 .. node${TOTAL_NODES})
+CLONE_NODES=()
+for ((i=2; i<=TOTAL_NODES; i++)); do
+    CLONE_NODES+=("node${i}")
 done
 
 # Clean stale host keys from ~/.ssh/known_hosts for cluster nodes from previous runs
@@ -419,57 +425,62 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
 success "Runtime configured on $NODE."
 
 # ------------------------------------------------------------------------------
-# Step 12: Clone node2 and node3 from node1
+# Step 12: Clone remaining nodes from node1
 # ------------------------------------------------------------------------------
-step_header "12" "Clone node2 and node3 from node1"
+if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
+    step_header "12" "Clone remaining nodes (${CLONE_NODES[*]}) from node1"
 
-# i) Stop node1 and wait for it to stop
-info "Stopping node1 before cloning..."
-if [ "$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')" = "RUNNING" ]; then
-    $CONTAINER_CMD stop node1
-fi
-until [ "$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')" = "STOPPED" ]; do
-    info "Waiting for node1 to stop..."
-    sleep 1
-done
-success "node1 is stopped."
-
-# ii) Copy node2 and node3 from node1 and configure their static IPs
-for TARGET_NODE in node2 node3; do
-    IP="${NODE_IPS[$TARGET_NODE]}"
-    if ! $CONTAINER_CMD info "$TARGET_NODE" >/dev/null 2>&1; then
-        info "Copying $TARGET_NODE from node1..."
-        $CONTAINER_CMD copy node1 "$TARGET_NODE"
-        info "Setting static IP ($IP) on $TARGET_NODE..."
-        $CONTAINER_CMD config device set "$TARGET_NODE" eth0 ipv4.address "$IP"
-    else
-        info "Container $TARGET_NODE already exists."
+    # i) Stop node1 and wait for it to stop
+    info "Stopping node1 before cloning..."
+    if [ "$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')" = "RUNNING" ]; then
+        $CONTAINER_CMD stop node1
     fi
-done
-
-# iii) Start node1, node2, and node3
-for NODE in "${NODES[@]}"; do
-    STATE=$($CONTAINER_CMD info "$NODE" | awk '/^Status:/ {print $2}')
-    if [ "$STATE" != "RUNNING" ]; then
-        info "Starting $NODE..."
-        $CONTAINER_CMD start "$NODE"
-    fi
-done
-
-# iv) Wait for all nodes to be RUNNING
-for NODE in "${NODES[@]}"; do
-    until [ "$($CONTAINER_CMD info "$NODE" | awk '/^Status:/ {print $2}')" = "RUNNING" ]; do
-        info "Waiting for $NODE to reach RUNNING status..."
+    until [ "$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')" = "STOPPED" ]; do
+        info "Waiting for node1 to stop..."
         sleep 1
     done
-done
+    success "node1 is stopped."
 
-# v) Set hostnames, regenerate machine-ids, and verify SSH
-for TARGET_NODE in node2 node3; do
-    info "Setting hostname and regenerating machine-id on $TARGET_NODE..."
-    $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "echo '$TARGET_NODE' > /etc/hostname && hostname '$TARGET_NODE'"
-    $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup" >/dev/null 2>&1
-done
+    # ii) Copy remaining nodes from node1 and configure their static IPs
+    for TARGET_NODE in "${CLONE_NODES[@]}"; do
+        IP="${NODE_IPS[$TARGET_NODE]}"
+        if ! $CONTAINER_CMD info "$TARGET_NODE" >/dev/null 2>&1; then
+            info "Copying $TARGET_NODE from node1..."
+            $CONTAINER_CMD copy node1 "$TARGET_NODE"
+            info "Setting static IP ($IP) on $TARGET_NODE..."
+            $CONTAINER_CMD config device set "$TARGET_NODE" eth0 ipv4.address "$IP"
+        else
+            info "Container $TARGET_NODE already exists."
+        fi
+    done
+
+    # iii) Start all nodes
+    for NODE in "${NODES[@]}"; do
+        STATE=$($CONTAINER_CMD info "$NODE" | awk '/^Status:/ {print $2}')
+        if [ "$STATE" != "RUNNING" ]; then
+            info "Starting $NODE..."
+            $CONTAINER_CMD start "$NODE"
+        fi
+    done
+
+    # iv) Wait for all nodes to be RUNNING
+    for NODE in "${NODES[@]}"; do
+        until [ "$($CONTAINER_CMD info "$NODE" | awk '/^Status:/ {print $2}')" = "RUNNING" ]; do
+            info "Waiting for $NODE to reach RUNNING status..."
+            sleep 1
+        done
+    done
+
+    # v) Set hostnames, regenerate machine-ids, and verify SSH
+    for TARGET_NODE in "${CLONE_NODES[@]}"; do
+        info "Setting hostname and regenerating machine-id on $TARGET_NODE..."
+        $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "echo '$TARGET_NODE' > /etc/hostname && hostname '$TARGET_NODE'"
+        $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup" >/dev/null 2>&1
+    done
+else
+    step_header "12" "Single-node deployment (skipping cloning)"
+    info "Only node1 is defined; skipping clone step."
+fi
 
 # Verify SSH connectivity to all nodes
 for NODE in "${NODES[@]}"; do
@@ -479,7 +490,7 @@ for NODE in "${NODES[@]}"; do
     done
     success "SSH to $NODE is operational."
 done
-success "All nodes (node1, node2, node3) are cloned, started, and reachable via SSH."
+success "All nodes (${NODES[*]}) are cloned, started, and reachable via SSH."
 
 # ------------------------------------------------------------------------------
 # Step 13: Bootstrap node1 with kube-vip and kubeadm init

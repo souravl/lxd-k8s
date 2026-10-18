@@ -60,11 +60,11 @@ else
             exit 1
         fi
     fi
-    HOSTS_ENTRIES=(
-        "${NODE1_IP} node1"
-        "${NODE2_IP} node2"
-        "${NODE3_IP} node3"
-    )
+    HOSTS_ENTRIES=()
+    for ((i=1; i<=TOTAL_NODES; i++)); do
+        var="NODE${i}_IP"
+        HOSTS_ENTRIES+=("${!var} node${i}")
+    done
 fi
 
 # Derive NODES list from TARGET_NODES if specified, else from existing containers in HOSTS_ENTRIES
