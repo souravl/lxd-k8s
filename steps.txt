@@ -163,19 +163,19 @@ EOF
     Copy /home/$USER/.kube/config from node1 to $HOME/.kube/config on the host machine so kubectl can be used from the host.
 
 15. Update join configuration files on host:
-    Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
+    Update kubeadm-join-cp-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
 
 16. For node2 (Join Control Plane):
-    i)   SCP modified kubeadm-join-cp2-config.yaml to node2.
+    i)   SCP modified kubeadm-join-cp-config.yaml to node2.
     ii)  Run:
-         sudo kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification
+         sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
     iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
     iv)  Exit out of node2 back to host machine.
 
 17. For node3 (Join Control Plane):
-    i)   SCP modified kubeadm-join-cp3-config.yaml to node3.
+    i)   SCP modified kubeadm-join-cp-config.yaml to node3.
     ii)  Run:
-         sudo kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification
+         sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
     iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
     iv)  Exit out of node3 back to host machine.
 

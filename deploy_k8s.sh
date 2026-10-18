@@ -527,7 +527,7 @@ chmod 600 "$HOME/.kube/config"
 success "Kubeconfig successfully copied to $HOME/.kube/config."
 
 # ------------------------------------------------------------------------------
-# Step 15: Update kubeadm-join-cp2-config.yaml and kubeadm-join-cp3-config.yaml
+# Step 15: Validate join credentials for node2 and node3
 # ------------------------------------------------------------------------------
 step_header "15" "Validate join credentials for node2 and node3"
 info "Active join credentials verified for control plane VIP: ${VIP}"
@@ -537,18 +537,18 @@ success "Join credentials ready."
 # Step 16: Join node2
 # ------------------------------------------------------------------------------
 step_header "16" "Join node2 to control plane"
-info "Copying parameterized kubeadm-join-cp2-config.yaml to node2..."
+info "Copying parameterized kubeadm-join-cp-config.yaml to node2..."
 sed \
-    -e "s|\${NODE2_IP}|${NODE2_IP}|g" \
+    -e "s|\${NODE_IP}|${NODE2_IP}|g" \
     -e "s|\${VIP}|${VIP}|g" \
     -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
     -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
     -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
-    "${SCRIPT_DIR}/kubeadm-join-cp2-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" "cat > ~/kubeadm-join-cp2-config.yaml"
+    "${SCRIPT_DIR}/kubeadm-join-cp-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" "cat > ~/kubeadm-join-cp-config.yaml"
 
 info "Executing kubeadm join on node2..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" '
-    sudo kubeadm join --config ./kubeadm-join-cp2-config.yaml --ignore-preflight-errors=SystemVerification
+    sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
     mkdir -p $HOME/.kube
     sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
     sudo chown $(id -u):$(id -g) $HOME/.kube/config
@@ -559,18 +559,18 @@ success "Node2 joined successfully."
 # Step 17: Join node3
 # ------------------------------------------------------------------------------
 step_header "17" "Join node3 to control plane"
-info "Copying parameterized kubeadm-join-cp3-config.yaml to node3..."
+info "Copying parameterized kubeadm-join-cp-config.yaml to node3..."
 sed \
-    -e "s|\${NODE3_IP}|${NODE3_IP}|g" \
+    -e "s|\${NODE_IP}|${NODE3_IP}|g" \
     -e "s|\${VIP}|${VIP}|g" \
     -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
     -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
     -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
-    "${SCRIPT_DIR}/kubeadm-join-cp3-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" "cat > ~/kubeadm-join-cp3-config.yaml"
+    "${SCRIPT_DIR}/kubeadm-join-cp-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" "cat > ~/kubeadm-join-cp-config.yaml"
 
 info "Executing kubeadm join on node3..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" '
-    sudo kubeadm join --config ./kubeadm-join-cp3-config.yaml --ignore-preflight-errors=SystemVerification
+    sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
     mkdir -p $HOME/.kube
     sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
     sudo chown $(id -u):$(id -g) $HOME/.kube/config

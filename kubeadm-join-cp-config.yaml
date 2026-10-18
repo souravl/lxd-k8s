@@ -4,7 +4,7 @@ nodeRegistration:
   criSocket: unix:///run/containerd/containerd.sock
   kubeletExtraArgs:
     - name: node-ip
-      value: ${NODE2_IP}
+      value: ${NODE_IP}
 discovery:
   bootstrapToken:
     token: "${JOIN_TOKEN}"
@@ -12,6 +12,6 @@ discovery:
     caCertHashes: ["sha256:${CA_CERT_HASH}"]
 controlPlane:
   localAPIEndpoint:
-    advertiseAddress: ${NODE2_IP}
+    advertiseAddress: ${NODE_IP}
     bindPort: 6443
   certificateKey: "${CERT_KEY}"

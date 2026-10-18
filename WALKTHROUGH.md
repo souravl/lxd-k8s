@@ -56,9 +56,9 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 | **12** | Clone node2 & node3 | Stops `node1`, clones `node2` and `node3` (`incus copy` / `lxc copy`), assigns their static IPs, starts all nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
 | **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
 | **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
-| **15** | Update join configs | Substitutes active token, CA cert hash, and certificate key into `kubeadm-join-cp2-config.yaml` and `kubeadm-join-cp3-config.yaml` via safe temporary file write-back. |
-| **16** | Node 2 join | SCPs `kubeadm-join-cp2-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node2`. |
-| **17** | Node 3 join | SCPs `kubeadm-join-cp3-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config` on `node3`. |
+| **15** | Validate join credentials | Validates active join token, CA cert hash, and certificate key for `node2` and `node3`. |
+| **16** | Node 2 join | Streams parameterized `kubeadm-join-cp-config.yaml` to `node2`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |
+| **17** | Node 3 join | Streams parameterized `kubeadm-join-cp-config.yaml` to `node3`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |
 | **18** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
 | **19** | Host tooling | Installs `cilium` CLI (with curl progress bar), Helm, and Kubectl with existence checks to skip on repeat runs. |
 | **20** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
