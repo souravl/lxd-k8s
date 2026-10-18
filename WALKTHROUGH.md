@@ -63,9 +63,9 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 | **8** | Container `k8s` profile | Creates profile `k8s` and configures it with parameterized `k8s-container-profile-config`. |
 | **9** | Launch node1 | Launches only `node1` using profile `k8s` and static IP `NODE1_IP`. |
 | **10** | SSH & node setup | Invokes `setup_ssh_nodes.sh` to configure user, sudoers, and authorized keys on `node1`. |
-| **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh` on `node1`, configures `config.toml`, and pulls pause image. |
+| **11** | Runtime & Kubeadm | Directly installs containerd and Kubernetes packages on `node1` over SSH, configures `config.toml`, and pre-pulls pause image. |
 | **12** | Clone remaining nodes | Stops `node1`, clones all remaining nodes (`node2` .. `node${TOTAL_NODES}`) via `incus copy` / `lxc copy`, sets static IPs, starts nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
-| **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
+| **13** | Node 1 Bootstrap | Directly generates `kube-vip.yaml` manifest on `node1`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
 | **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
 | **15** | Validate join credentials | Validates active join token, CA cert hash, and certificate key for control plane and worker nodes. |
 | **16** | Join control planes | Loops over remaining control plane nodes (`node2` .. `node${NUM_CP}`), streams parameterized `kubeadm-join-cp-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |

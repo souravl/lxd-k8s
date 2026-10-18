@@ -422,17 +422,32 @@ step_header "11" "Install and configure containerd and kubeadm on node1"
 NODE="node1"
 info "--- Configuring runtime and Kubernetes binaries on $NODE ---"
 
-# i) scp containerd_install.sh, kubeadm_install.sh
-info "Copying installation scripts to $NODE..."
-scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/containerd_install.sh" "${SCRIPT_DIR}/kubeadm_install.sh" "${SSH_USER}@${NODE}:~/"
+# i) Install containerd
+info "Installing containerd on $NODE..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "bash -s" <<'EOF'
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq ca-certificates curl
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-# ii) & iii) run containerd_install.sh
-info "Running containerd_install.sh on $NODE..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; bash ~/containerd_install.sh"
+    UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    ARCH=$(dpkg --print-architecture)
+    sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<DOCKER_EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${UBUNTU_CODENAME}
+Components: stable
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
+DOCKER_EOF
 
-# iv) rm config.toml; mkdir -p; containerd config default | tee
-# v) SystemdCgroup = true, disabled_plugins = []
-# vi) daemon-reload and restart containerd
+    sudo apt-get update -qq
+    sudo apt-get install -y containerd.io
+EOF
+
+# ii) Configure containerd (SystemdCgroup = true, disabled_plugins = [])
 info "Configuring containerd on $NODE..."
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
     sudo rm -rf /etc/containerd/config.toml
@@ -444,9 +459,20 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
     sudo systemctl restart containerd
 "
 
-# vii) run kubeadm_install.sh
-info "Running kubeadm_install.sh on $NODE..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "export DEBIAN_FRONTEND=noninteractive; export KUBERNETES_VERSION='${KUBERNETES_VERSION}'; bash ~/kubeadm_install.sh"
+# iii) Install Kubernetes packages (kubelet, kubeadm, kubectl, cri-tools)
+info "Installing Kubernetes packages (${KUBERNETES_VERSION}) on $NODE..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "KUBERNETES_VERSION='${KUBERNETES_VERSION}' bash -s" <<'EOF'
+    export DEBIAN_FRONTEND=noninteractive
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq apt-transport-https ca-certificates curl gpg
+    sudo install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+    sudo apt-get update -qq
+    sudo apt-get install -y kubelet kubeadm kubectl cri-tools
+    sudo apt-mark hold kubelet kubeadm kubectl cri-tools
+    sudo systemctl enable --now kubelet
+EOF
 
 # viii) kubeadm config images pull - check which version of pause
 # ix) change the sandbox in containerd config.toml to this version
@@ -543,16 +569,28 @@ success "All nodes (${NODES[*]}) are cloned, started, and reachable via SSH."
 # ------------------------------------------------------------------------------
 step_header "13" "Bootstrap control plane on node1"
 
-# i) & ii) scp kube-vip.sh, run it
-info "Generating and configuring kube-vip on node1 (VIP: $VIP)..."
-scp "${SSH_OPTS[@]}" "${SCRIPT_DIR}/kube-vip.sh" "${SSH_USER}@node1:~/"
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "export DEBIAN_FRONTEND=noninteractive; export VIP='${VIP}'; sudo -E bash ~/kube-vip.sh"
+# Generate and configure kube-vip static pod manifest on node1
+info "Generating and configuring kube-vip static pod manifest on node1 (VIP: $VIP)..."
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "VIP='${VIP}' bash -s" <<'EOF'
+    set -e
+    INTERFACE="eth0"
+    KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name" 2>/dev/null || true)
+    if [ -z "$KVVERSION" ] || [ "$KVVERSION" = "null" ]; then
+        KVVERSION="v1.3.0"
+    fi
+    sudo ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION
+    sudo mkdir -p /etc/kubernetes/manifests
+    sudo ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip manifest pod \
+        --interface "$INTERFACE" \
+        --address "$VIP" \
+        --controlplane \
+        --services \
+        --arp \
+        --leaderElection | sudo tee /etc/kubernetes/manifests/kube-vip.yaml >/dev/null
 
-# Temporarily point kube-vip to super-admin.conf for initial bootstrap
-info "Configuring kube-vip to use super-admin.conf during initial bootstrap..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
+    # Temporarily point kube-vip to super-admin.conf for initial bootstrap
     sudo sed -i "s|path: /etc/kubernetes/admin.conf|path: /etc/kubernetes/super-admin.conf|g" /etc/kubernetes/manifests/kube-vip.yaml
-'
+EOF
 
 # Copy parameterized kubeadm-init-config.yaml to node1
 info "Copying parameterized kubeadm-init-config.yaml to node1..."

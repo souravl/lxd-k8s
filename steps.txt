@@ -86,26 +86,44 @@ EOF
     TARGET_NODES="node1" bash setup_ssh_nodes.sh
 
 11. On node1:
-    i)   SCP containerd_install.sh and kubeadm_install.sh to node1.
-    ii)  SSH into node1.
-    iii) Run containerd_install.sh (with sudo for appropriate commands).
-    iv)  Generate default containerd configuration:
+    i)   Install containerd:
+         sudo apt-get update
+         sudo apt-get install -y ca-certificates curl
+         sudo install -m 0755 -d /etc/apt/keyrings
+         sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+         sudo chmod a+r /etc/apt/keyrings/docker.asc
+         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+         sudo apt-get update
+         sudo apt-get install -y containerd.io
+
+    ii)  Generate default containerd configuration:
          sudo rm -rf /etc/containerd/config.toml
          sudo mkdir -p /etc/containerd
          containerd config default | sudo tee /etc/containerd/config.toml
-    v)   In the generated /etc/containerd/config.toml, update:
+    iii) In the generated /etc/containerd/config.toml, update:
          - SystemdCgroup = true
          - disabled_plugins = []
-    vi)  Reload systemd daemon and restart containerd:
+    iv)  Reload systemd daemon and restart containerd:
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
-    vii) Run kubeadm_install.sh.
-    viii) Pull images with kubeadm and determine the pause image version:
+
+    v)   Install Kubernetes packages (kubelet, kubeadm, kubectl, cri-tools):
+         sudo apt-get update
+         sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+         sudo install -m 0755 -d /etc/apt/keyrings
+         curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key" | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+         echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.37/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+         sudo apt-get update
+         sudo apt-get install -y kubelet kubeadm kubectl cri-tools
+         sudo apt-mark hold kubelet kubeadm kubectl cri-tools
+         sudo systemctl enable --now kubelet
+
+    vi)  Pull images with kubeadm and determine the pause image version:
          sudo kubeadm config images pull
          (Check which version of pause image is specified)
-    ix)  Update the sandbox image in /etc/containerd/config.toml to match this version:
+    vii) Update the sandbox image in /etc/containerd/config.toml to match this version:
          e.g. sandbox = 'registry.k8s.io/pause:3.10.2'
-    x)   Reload systemd daemon and restart containerd:
+    viii) Reload systemd daemon and restart containerd:
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
 
@@ -145,8 +163,18 @@ EOF
       v)   Verify SSH connectivity to all nodes.
 
 13. For node1 (Bootstrap Control Plane):
-    i)    SCP kube-vip.sh and kubeadm-init-config.yaml to node1.
-    ii)   Run kube-vip.sh.
+    i)    Copy parameterized kubeadm-init-config.yaml to node1.
+    ii)   Generate kube-vip static pod manifest on node1:
+          KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name" 2>/dev/null || echo "v1.3.0")
+          sudo ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION
+          sudo mkdir -p /etc/kubernetes/manifests
+          sudo ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip manifest pod \
+              --interface eth0 \
+              --address 10.67.38.40 \
+              --controlplane \
+              --services \
+              --arp \
+              --leaderElection | sudo tee /etc/kubernetes/manifests/kube-vip.yaml
     iii)  Temporarily update hostPath to super-admin.conf in kube-vip manifest:
           sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
     iv)   Initialize control plane with kubeadm:

@@ -82,7 +82,8 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | `setup_ssh_nodes.sh` | Container user, passwordless sudo, and SSH key setup for Incus and LXD |
 | `container-engine-init-config` | Parameterized container engine preseed configuration |
 | `k8s-container-profile-config` | Parameterized container profile for Kubernetes |
-| `containerd_install.sh` | Container runtime installation script |
-| `kubeadm_install.sh` | Kubernetes node components installation script |
-| `kube-vip.sh` | `kube-vip` static pod manifest generator |
+| `kubeadm-init-config.yaml` | Parameterized kubeadm init configuration for bootstrap control plane |
+| `kubeadm-join-cp-config.yaml` | Parameterized kubeadm join configuration for secondary control planes |
+| `kubeadm-join-worker-config.yaml` | Parameterized kubeadm join configuration for worker nodes |
+| `cilium-deploy.yaml` | Helm values configuration for Cilium CNI installation |
 | `steps.txt` | Unified step-by-step manual guide for Incus and LXD |
