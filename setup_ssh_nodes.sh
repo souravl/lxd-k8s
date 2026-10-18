@@ -22,6 +22,14 @@ else
         source "${SCRIPT_DIR}/inventory.txt"
     fi
     NUM_CP="${NUM_CP:-3}"
+    if ! [[ "$NUM_CP" =~ ^[1-9][0-9]*$ ]]; then
+        echo "[ERROR] Invalid NUM_CP='${NUM_CP}' in inventory.txt! NUM_CP must be a positive integer." >&2
+        exit 1
+    fi
+    if [ "$NUM_CP" -lt 3 ]; then
+        echo "[ERROR] Invalid NUM_CP='${NUM_CP}' in inventory.txt! High-Availability Kubernetes requires at least 3 control planes (NUM_CP >= 3)." >&2
+        exit 1
+    fi
     NUM_WORKER="${NUM_WORKER:-0}"
     TOTAL_NODES=$((NUM_CP + NUM_WORKER))
     NODE_IPS_COUNT=0

@@ -1,40 +1,53 @@
 # Walkthrough: HA Kubernetes Deployment Script on Incus & LXD
 
-We have automated and fully verified the deployment of a High-Availability, 3-node multi-master Kubernetes cluster on Incus and LXD containers with `kube-vip` and Cilium CNI by creating a unified master script [`deploy_k8s.sh`](deploy_k8s.sh) and hardening all companion scripts.
+We have automated and verified the deployment of a High-Availability, multi-control-plane (`NUM_CP >= 3`) and optional dedicated worker (`NUM_WORKER`) Kubernetes cluster on Incus and LXD containers with `kube-vip` virtual IP failover and Cilium eBPF CNI.
 
 ---
 
-## Changes Made & Hardening Applied
+## Architecture & Capabilities
 
 ### 1. Unified Multi-Engine Master Script
-- **[`deploy_k8s.sh`](deploy_k8s.sh)**
+- **[`deploy_k8s.sh`](deploy_k8s.sh)**:
   - Supports both **Incus** (default) and **LXD** via bash `getopts` (`./deploy_k8s.sh [-c incus|lxd]`).
-  - Implements all 26 steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
-  - **Node Cloning Architecture (Steps 9-12)**: Launches and provisions only `node1` with containerd, kubeadm, and pause image pre-pulling, then stops `node1` and clones `node2` and `node3` via `incus copy` or `lxc copy`, assigns static IPs, sets hostnames directly (`echo ... > /etc/hostname && hostname ...`), regenerates machine IDs, and verifies SSH across all nodes.
-  - **SSH Host Key Resilience**: Prunes stale keys from `$HOME/.ssh/known_hosts` on startup and sets `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)` so re-running after deleting and recreating containers never encounters `Host key verification failed`.
-  - **Idempotent Node1 Bootstrap**: Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
-  - **Token Selection Filter**: Correctly filters `kubeadm token list` for tokens with `authentication,signing` usage (avoiding internal TTL proxy tokens created by `upload-certs`).
-  - **SSHFS-Safe In-Place Edits**: Replaced `sed -i` on join config files with safe temp-file writing (`sed ... > tmp && cat tmp > file`), ensuring compatibility with SSHFS and FUSE mounts.
+  - Implements all deployment steps sequentially with colorized progress reporting and error tracing (`set -euo pipefail`).
+  - **Dynamic Cluster Topology**:
+    - Centralized in `inventory.txt` with `NUM_CP` (validated `>= 3`) and `NUM_WORKER` (validated non-negative).
+    - Strictly checks that node static IP variables (`NODE1_IP` .. `NODE${NUM_CP}_IP`) for control planes and (`NODE${NUM_CP+1}_IP` .. `NODE${NUM_CP+NUM_WORKER}_IP`) for workers are defined sequentially without gaps.
+  - **Node Cloning Architecture (Step 12)**:
+    - Launches and provisions only `node1` with containerd, kubeadm, and pause image pre-pulling.
+    - Stops `node1` and clones all remaining nodes (`node2` .. `node${TOTAL_NODES}`) via `incus copy` or `lxc copy`.
+    - Automatically assigns static IPs, sets hostnames directly (`echo ... > /etc/hostname && hostname ...`), regenerates machine IDs, and verifies SSH across all nodes.
+  - **Collapsed Control Plane Joining (Step 16)**:
+    - Loops through all remaining control plane nodes (`node2` .. `node${NUM_CP}`) to stream parameterized `kubeadm-join-cp-config.yaml`, execute `kubeadm join`, and configure `$HOME/.kube/config`.
+  - **kube-vip Distribution (Step 17)**:
+    - Distributes `kube-vip.yaml` static pod manifests exclusively to secondary control plane nodes.
+  - **Worker Node Joining (Step 18)**:
+    - Loops through all worker nodes (`node${NUM_CP+1}` .. `node${TOTAL_NODES}`) to stream parameterized `kubeadm-join-worker-config.yaml` and execute worker `kubeadm join`.
+  - **Control Plane Untainting (Step 20)**:
+    - Removes control-plane taints from all control plane nodes (`node1` .. `node${NUM_CP}`), enabling workload scheduling across control planes while preserving standard worker node semantics.
+  - **SSH Host Key Resilience**:
+    - Prunes stale keys from `$HOME/.ssh/known_hosts` on startup and sets `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)` so re-running after deleting and recreating containers never encounters host key verification conflicts.
+  - **Idempotent Node1 Bootstrap**:
+    - Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
   - Automatically handles in-session group activation via `exec sg incus-admin` or `exec sg lxd`, preserving all command-line arguments.
 
-### 2. Unified Supporting Scripts & Symmetric Profiles
+### 2. Unified Supporting Scripts & Profiles
 - **[`setup_ssh_nodes.sh`](setup_ssh_nodes.sh)**:
   - Unified script replacing engine-specific variants; uses `$CONTAINER_CMD` (`incus` or `lxc`).
-  - Automatically prunes stale cluster host keys from `$HOME/.ssh/known_hosts`.
-  - Added an initial check for existing passwordless SSH access across all nodes. If SSH is already working, it skips the container configuration and password prompt entirely.
-  - Added support for `CONTAINER_PASS` environment variable.
+  - Prunes stale cluster host keys from `$HOME/.ssh/known_hosts`.
+  - Supports `CONTAINER_PASS` environment variable and passwordless SSH detection.
+  - Synchronized with `inventory.txt` validation (`NUM_CP >= 3`, `NUM_WORKER`, and sequential node IP checks).
 - **[`docker_iptables.sh`](docker_iptables.sh)**:
   - Unified firewall coexistence script accepting bridge name (`incusbr0` or `lxdbr0`).
 - **[`inventory.txt`](inventory.txt)**:
-  - Centralized cluster inventory replacing `software_install_version.txt`.
-  - Defines the virtual IP (`VIP`), bridge gateway IPs (`BRIDGE_IPV4`, `BRIDGE_IPV6`), static node IP addresses (`NODE1_IP`, `NODE2_IP`, `NODE3_IP`), container resource limits (`LIMITS_CPU="4"`, `LIMITS_MEMORY="4GB"`), the container OS release (`UBUNTU_VERSION="24.04"`), and software versions (`KUBERNETES_VERSION`, `CILIUM_VERSION`).
-  - Automatically sourced by both `deploy_k8s.sh` and `setup_ssh_nodes.sh`.
+  - Centralized cluster inventory declaring `NUM_CP`, `NUM_WORKER`, `VIP`, bridge network gateways, static node IPs, container resource limits, and software versions (`UBUNTU_VERSION="24.04"`, `KUBERNETES_VERSION="v1.37"`, `CILIUM_VERSION="1.20.2"`).
 - **Unified Parameterized Configurations**:
-  - `container-engine-init-config`: Unified preseed configuration parameterizing `${BRIDGE}`, `${STORAGE_POOL_DIR}`, `${BRIDGE_IPV4}`, and `${BRIDGE_IPV6}`.
-  - `k8s-container-profile-config`: Unified profile configuration parameterizing `${BRIDGE}`, `${LIMITS_CPU}`, and `${LIMITS_MEMORY}`.
-  - Removed engine-specific references from descriptions (`description: Profile for Kubernetes`, `description: Default profile`, `description: Default project`).
+  - `container-engine-init-config`: Preseed initialization config parameterizing bridge and storage pool directory.
+  - `k8s-container-profile-config`: Profile configuration parameterizing bridge, CPU, and memory limits.
+  - `kubeadm-join-cp-config.yaml`: Parameterized control-plane join configuration.
+  - `kubeadm-join-worker-config.yaml`: Parameterized worker-node join configuration.
 - **[`steps.txt`](steps.txt)**:
-  - Unified step-by-step manual guide presenting Incus and LXD commands side-by-side for steps 1–12 and shared instructions for steps 13–26.
+  - Step-by-step manual reference documenting both Incus and LXD operations side-by-side.
 
 ---
 
@@ -50,19 +63,19 @@ We have automated and fully verified the deployment of a High-Availability, 3-no
 | **6** | Engine initialization | Runs preseed initialization with parameterized `container-engine-init-config`. |
 | **7** | Docker firewall coexistence | Executes `docker_iptables.sh <bridge>`. |
 | **8** | Container `k8s` profile | Creates profile `k8s` and configures it with parameterized `k8s-container-profile-config`. |
-| **9** | Launch node1 | Launches only `node1` (10.67.38.87) using profile `k8s` and `-d eth0,ipv4.address=10.67.38.87`. |
+| **9** | Launch node1 | Launches only `node1` using profile `k8s` and static IP `NODE1_IP`. |
 | **10** | SSH & node setup | Invokes `setup_ssh_nodes.sh` to configure user, sudoers, and authorized keys on `node1`. |
-| **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh` on `node1` only, configures `config.toml`, and pulls pause image. |
-| **12** | Clone node2 & node3 | Stops `node1`, clones `node2` and `node3` (`incus copy` / `lxc copy`), assigns their static IPs, starts all nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
+| **11** | Runtime & Kubeadm | Copies and runs `containerd_install.sh` and `kubeadm_install.sh` on `node1`, configures `config.toml`, and pulls pause image. |
+| **12** | Clone remaining nodes | Stops `node1`, clones all remaining nodes (`node2` .. `node${TOTAL_NODES}`) via `incus copy` / `lxc copy`, sets static IPs, starts nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
 | **13** | Node 1 Bootstrap | Runs `kube-vip.sh`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
 | **14** | Host Kubeconfig | Copies `~/.kube/config` from `node1` to host's `$HOME/.kube/config`. |
-| **15** | Validate join credentials | Validates active join token, CA cert hash, and certificate key for `node2` and `node3`. |
-| **16** | Node 2 join | Streams parameterized `kubeadm-join-cp-config.yaml` to `node2`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |
-| **17** | Node 3 join | Streams parameterized `kubeadm-join-cp-config.yaml` to `node3`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |
-| **18** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to `node2` and `node3`. |
+| **15** | Validate join credentials | Validates active join token, CA cert hash, and certificate key for control plane and worker nodes. |
+| **16** | Join control planes | Loops over remaining control plane nodes (`node2` .. `node${NUM_CP}`), streams parameterized `kubeadm-join-cp-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |
+| **17** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to remaining control plane nodes (`node2` .. `node${NUM_CP}`). |
+| **18** | Join worker nodes | Loops over worker nodes (`node${NUM_CP+1}` .. `node${TOTAL_NODES}`), streams parameterized `kubeadm-join-worker-config.yaml`, and runs `kubeadm join`. |
 | **19** | Host tooling | Installs `cilium` CLI (with curl progress bar), Helm, and Kubectl with existence checks to skip on repeat runs. |
-| **20** | Untaint nodes | Runs `kubectl taint nodes --all node-role.kubernetes.io/control-plane-` so pods can schedule across the all-control-plane topology. |
-| **21** | Fetch Cilium chart | Downloads `cilium-1.20.2.tgz` via `helm pull oci://quay.io/cilium/charts/cilium`. |
+| **20** | Untaint CP nodes | Runs `kubectl taint nodes <node> node-role.kubernetes.io/control-plane-` across all control plane nodes (`node1` .. `node${NUM_CP}`). |
+| **21** | Fetch Cilium chart | Downloads `cilium-${CILIUM_VERSION}.tgz` via `helm pull oci://quay.io/cilium/charts/cilium`. |
 | **22** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |
 | **23** | Apply Cilium | Runs `kubectl apply -f ./cilium.yaml`. |
 | **24** | Wait for Cilium | Loops `cilium status --wait` until ready. |

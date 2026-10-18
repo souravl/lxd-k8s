@@ -86,6 +86,10 @@ if ! [[ "$NUM_CP" =~ ^[1-9][0-9]*$ ]]; then
     error "Invalid NUM_CP='${NUM_CP}' in inventory.txt! NUM_CP must be a positive integer."
     exit 1
 fi
+if [ "$NUM_CP" -lt 3 ]; then
+    error "Invalid NUM_CP='${NUM_CP}' in inventory.txt! High-Availability Kubernetes requires at least 3 control planes (NUM_CP >= 3)."
+    exit 1
+fi
 
 NUM_WORKER="${NUM_WORKER:-0}"
 if ! [[ "$NUM_WORKER" =~ ^[0-9]+$ ]]; then
@@ -187,6 +191,28 @@ CLONE_NODES=()
 for ((i=2; i<=TOTAL_NODES; i++)); do
     CLONE_NODES+=("node${i}")
 done
+
+# Control plane nodes (node1 .. node${NUM_CP})
+CP_NODES=()
+for ((i=1; i<=NUM_CP; i++)); do
+    CP_NODES+=("node${i}")
+done
+
+# Remaining control plane nodes to join (node2 .. node${NUM_CP})
+CP_JOIN_NODES=()
+for ((i=2; i<=NUM_CP; i++)); do
+    CP_JOIN_NODES+=("node${i}")
+done
+
+# Worker nodes ((NUM_CP + 1) .. (NUM_CP + NUM_WORKER))
+WORKER_NODES=()
+if [ "$NUM_WORKER" -gt 0 ]; then
+    START_WORKER=$((NUM_CP + 1))
+    END_WORKER=$((NUM_CP + NUM_WORKER))
+    for ((i=START_WORKER; i<=END_WORKER; i++)); do
+        WORKER_NODES+=("node${i}")
+    done
+fi
 
 # Clean stale host keys from ~/.ssh/known_hosts for cluster nodes from previous runs
 if [ -f "$HOME/.ssh/known_hosts" ]; then
@@ -594,64 +620,46 @@ chmod 600 "$HOME/.kube/config"
 success "Kubeconfig successfully copied to $HOME/.kube/config."
 
 # ------------------------------------------------------------------------------
-# Step 15: Validate join credentials for node2 and node3
+# Step 15: Validate join credentials for remaining control plane nodes
 # ------------------------------------------------------------------------------
-step_header "15" "Validate join credentials for node2 and node3"
-info "Active join credentials verified for control plane VIP: ${VIP}"
+step_header "15" "Validate join credentials for control plane nodes"
+info "Active join credentials verified for control plane VIP: ${VIP} (joining: ${CP_JOIN_NODES[*]})"
 success "Join credentials ready."
 
 # ------------------------------------------------------------------------------
-# Step 16: Join node2
+# Step 16: Join remaining control plane nodes to cluster
 # ------------------------------------------------------------------------------
-step_header "16" "Join node2 to control plane"
-info "Copying parameterized kubeadm-join-cp-config.yaml to node2..."
-sed \
-    -e "s|\${NODE_IP}|${NODE2_IP}|g" \
-    -e "s|\${VIP}|${VIP}|g" \
-    -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
-    -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
-    -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
-    "${SCRIPT_DIR}/kubeadm-join-cp-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" "cat > ~/kubeadm-join-cp-config.yaml"
+step_header "16" "Join remaining control planes (${CP_JOIN_NODES[*]})"
+for NODE in "${CP_JOIN_NODES[@]}"; do
+    IP="${NODE_IPS[$NODE]}"
+    info "Copying parameterized kubeadm-join-cp-config.yaml to $NODE (IP: $IP)..."
+    sed \
+        -e "s|\${NODE_IP}|${IP}|g" \
+        -e "s|\${VIP}|${VIP}|g" \
+        -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
+        -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
+        -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
+        "${SCRIPT_DIR}/kubeadm-join-cp-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "cat > ~/kubeadm-join-cp-config.yaml"
 
-info "Executing kubeadm join on node2..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@node2" '
-    sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
-    mkdir -p $HOME/.kube
-    sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
-    sudo chown $(id -u):$(id -g) $HOME/.kube/config
-'
-success "Node2 joined successfully."
-
-# ------------------------------------------------------------------------------
-# Step 17: Join node3
-# ------------------------------------------------------------------------------
-step_header "17" "Join node3 to control plane"
-info "Copying parameterized kubeadm-join-cp-config.yaml to node3..."
-sed \
-    -e "s|\${NODE_IP}|${NODE3_IP}|g" \
-    -e "s|\${VIP}|${VIP}|g" \
-    -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
-    -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
-    -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
-    "${SCRIPT_DIR}/kubeadm-join-cp-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" "cat > ~/kubeadm-join-cp-config.yaml"
-
-info "Executing kubeadm join on node3..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@node3" '
-    sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
-    mkdir -p $HOME/.kube
-    sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
-    sudo chown $(id -u):$(id -g) $HOME/.kube/config
-'
-success "Node3 joined successfully."
+    info "Executing kubeadm join on $NODE..."
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
+        sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
+        mkdir -p $HOME/.kube
+        sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
+        sudo chown $(id -u):$(id -g) $HOME/.kube/config
+    '
+    success "$NODE joined control plane successfully."
+done
+success "All remaining control plane nodes (${CP_JOIN_NODES[*]}) joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 18: Distribute kube-vip.yaml to node2 and node3
+# Step 17: Distribute kube-vip.yaml to remaining control plane nodes
 # ------------------------------------------------------------------------------
-step_header "18" "Distribute kube-vip.yaml to node2 and node3"
+step_header "17" "Distribute kube-vip.yaml to remaining control plane nodes (${CP_JOIN_NODES[*]})"
 TMP_KUBE_VIP=$(mktemp)
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo cat /etc/kubernetes/manifests/kube-vip.yaml" > "$TMP_KUBE_VIP"
 
-for NODE in node2 node3; do
+for NODE in "${CP_JOIN_NODES[@]}"; do
     info "Copying kube-vip manifest to $NODE..."
     scp "${SSH_OPTS[@]}" "$TMP_KUBE_VIP" "${SSH_USER}@${NODE}:/tmp/kube-vip.yaml"
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
@@ -662,6 +670,33 @@ for NODE in node2 node3; do
 done
 rm -f "$TMP_KUBE_VIP"
 success "Kube-vip manifests distributed to all control plane nodes."
+
+# ------------------------------------------------------------------------------
+# Step 18: Join worker nodes to cluster
+# ------------------------------------------------------------------------------
+if [ "${#WORKER_NODES[@]}" -gt 0 ]; then
+    step_header "18" "Join worker nodes (${WORKER_NODES[*]}) to cluster"
+    for NODE in "${WORKER_NODES[@]}"; do
+        IP="${NODE_IPS[$NODE]}"
+        info "Copying parameterized kubeadm-join-worker-config.yaml to $NODE (IP: $IP)..."
+        sed \
+            -e "s|\${NODE_IP}|${IP}|g" \
+            -e "s|\${VIP}|${VIP}|g" \
+            -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
+            -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
+            "${SCRIPT_DIR}/kubeadm-join-worker-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "cat > ~/kubeadm-join-worker-config.yaml"
+
+        info "Executing kubeadm join on $NODE..."
+        ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
+            sudo kubeadm join --config ./kubeadm-join-worker-config.yaml --ignore-preflight-errors=SystemVerification
+        '
+        success "$NODE joined as worker node successfully."
+    done
+    success "All worker nodes (${WORKER_NODES[*]}) joined successfully."
+else
+    step_header "18" "Join worker nodes to cluster"
+    info "No worker nodes defined (NUM_WORKER=0). Skipping worker join."
+fi
 
 # ------------------------------------------------------------------------------
 # Step 19: Install cilium CLI, helm, and kubectl on host
@@ -690,11 +725,15 @@ fi
 success "Host tooling ready."
 
 # ------------------------------------------------------------------------------
-# Step 20: Remove control-plane taints from all nodes
+# Step 20: Remove control-plane taints from control plane nodes
 # ------------------------------------------------------------------------------
-step_header "20" "Remove control-plane taints from all nodes"
-info "Removing control-plane taints so all nodes can schedule workloads..."
-kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true
+step_header "20" "Remove control-plane taints from control plane nodes"
+info "Removing control-plane taints from control plane nodes (${CP_NODES[*]})..."
+for NODE in "${CP_NODES[@]}"; do
+    info "Untainting control plane node $NODE..."
+    kubectl taint nodes "$NODE" node-role.kubernetes.io/control-plane- 2>/dev/null || true
+done
+success "Control-plane taints removed from ${CP_NODES[*]}."
 
 # ------------------------------------------------------------------------------
 # Step 21: Download Cilium Helm chart

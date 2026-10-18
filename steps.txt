@@ -165,22 +165,23 @@ EOF
 15. Update join configuration files on host:
     Update kubeadm-join-cp-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
 
-16. For node2 (Join Control Plane):
-    i)   SCP modified kubeadm-join-cp-config.yaml to node2.
-    ii)  Run:
-         sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
-    iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
-    iv)  Exit out of node2 back to host machine.
+16. For remaining control plane nodes (node2 .. nodeN) - Join Control Plane:
+    For each remaining control plane node:
+      i)   SCP parameterized kubeadm-join-cp-config.yaml to the node.
+      ii)  Run:
+           sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
+      iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+      iv)  Exit out of node back to host machine.
 
-17. For node3 (Join Control Plane):
-    i)   SCP modified kubeadm-join-cp-config.yaml to node3.
-    ii)  Run:
-         sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
-    iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
-    iv)  Exit out of node3 back to host machine.
+17. Distribute kube-vip manifest:
+    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on all remaining control plane nodes (node2 .. nodeN).
 
-18. Distribute kube-vip manifest:
-    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on both node2 and node3.
+18. For worker nodes (Join Worker Nodes):
+    For each worker node:
+      i)   SCP parameterized kubeadm-join-worker-config.yaml to the worker node.
+      ii)  Run:
+           sudo kubeadm join --config ./kubeadm-join-worker-config.yaml --ignore-preflight-errors=SystemVerification
+      iii) Exit out of node back to host machine.
 
 19. Install host tools:
     On the host machine, run:
@@ -188,10 +189,10 @@ EOF
       bash helm_install.sh
       bash kubectl_install.sh
 
-20. Remove control-plane taints from all nodes:
-    Run on host:
-      kubectl taint nodes --all node-role.kubernetes.io/control-plane-
-    (Allows scheduling user and system workloads across all control plane nodes)
+20. Remove control-plane taints from control plane nodes:
+    Run on host for each control plane node:
+      kubectl taint nodes <node> node-role.kubernetes.io/control-plane-
+    (Allows scheduling user and system workloads across control plane nodes)
 
 21. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
     helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
