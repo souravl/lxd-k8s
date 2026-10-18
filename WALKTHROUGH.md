@@ -29,18 +29,35 @@ We have automated and verified the deployment of a High-Availability, multi-cont
     - Prunes stale keys from `$HOME/.ssh/known_hosts` on startup and sets `SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)` so re-running after deleting and recreating containers never encounters host key verification conflicts.
   - **Idempotent Node1 Bootstrap**:
     - Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
+  - **Zero Helper Scripts (Fully Self-Contained Deployment)**:
+    - All previously external scripts (`docker_iptables.sh`, `setup_ssh_nodes.sh`, `containerd_install.sh`, `kubeadm_install.sh`, `kube-vip.sh`, `cilium_cli_install.sh`, `helm_install.sh`, `kubectl_install.sh`) have been folded directly into `deploy_k8s.sh`. This eliminates intermediate `scp` file transfers, avoids leaving temporary scripts in container home directories, and ensures complete deployment reproducibility from a single master script.
   - Automatically handles in-session group activation via `exec sg incus-admin` or `exec sg lxd`, preserving all command-line arguments.
 
-### 2. Unified Configurations & Profiles
+### 2. Unified Configurations & Manifests
 - **[`inventory.txt`](inventory.txt)**:
   - Centralized cluster inventory declaring `NUM_CP`, `NUM_WORKER`, `VIP`, bridge network gateways, static node IPs, container resource limits, and software versions (`UBUNTU_VERSION="24.04"`, `KUBERNETES_VERSION="v1.37"`, `CILIUM_VERSION="1.20.2"`).
 - **Unified Parameterized Configurations**:
   - `container-engine-init-config.yaml`: Preseed initialization config parameterizing bridge and storage pool directory.
   - `k8s-container-profile-config.yaml`: Profile configuration parameterizing bridge, CPU, and memory limits.
+  - `kubeadm-init-config.yaml`: Parameterized bootstrap control plane init configuration with `certSANs` and VIP endpoints.
   - `kubeadm-join-cp-config.yaml`: Parameterized control-plane join configuration.
   - `kubeadm-join-worker-config.yaml`: Parameterized worker-node join configuration.
+  - `cilium-deploy.yaml`: Helm values configuration for Cilium CNI installation.
+  - `dnsutils.yaml`: DNS testing pod manifest for cluster verification.
 - **[`steps.txt`](steps.txt)**:
   - Step-by-step manual reference documenting both Incus and LXD operations side-by-side.
+
+### 3. Usage & CLI Flags
+```bash
+# Deploy on Incus (default)
+./deploy_k8s.sh -c incus
+
+# Deploy on LXD
+./deploy_k8s.sh -c lxd
+
+# Non-interactive execution with pre-set container password
+CONTAINER_PASS="your_password" ./deploy_k8s.sh -c incus
+```
 
 ---
 
@@ -66,7 +83,7 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 | **16** | Join control planes | Loops over remaining control plane nodes (`node2` .. `node${NUM_CP}`), streams parameterized `kubeadm-join-cp-config.yaml`, runs `kubeadm join`, and configures `$HOME/.kube/config`. |
 | **17** | Distribute kube-vip | Copies `/etc/kubernetes/manifests/kube-vip.yaml` from `node1` to remaining control plane nodes (`node2` .. `node${NUM_CP}`). |
 | **18** | Join worker nodes | Loops over worker nodes (`node${NUM_CP+1}` .. `node${TOTAL_NODES}`), streams parameterized `kubeadm-join-worker-config.yaml`, and runs `kubeadm join`. |
-| **19** | Host tooling | Installs `cilium` CLI (with curl progress bar), Helm, and Kubectl with existence checks to skip on repeat runs. |
+| **19** | Host tooling | Installs Cilium CLI (with SHA256 verification), Helm (with Buildkite APT key ID verification), and Kubectl via APT (held) with idempotency checks to skip on repeat runs. |
 | **20** | Untaint CP nodes | Runs `kubectl taint nodes <node> node-role.kubernetes.io/control-plane-` across all control plane nodes (`node1` .. `node${NUM_CP}`). |
 | **21** | Fetch Cilium chart | Downloads `cilium-${CILIUM_VERSION}.tgz` via `helm pull oci://quay.io/cilium/charts/cilium`. |
 | **22** | Helm template | Generates `cilium.yaml` from `cilium-deploy.yaml`. |

@@ -1,6 +1,6 @@
 # lxd-k8s: High-Availability Kubernetes on Incus & LXD
 
-Automated deployment of a High-Availability (3-node multi-master) Kubernetes cluster running inside system containers (**Incus** or **LXD**) with `kube-vip` (virtual IP) and Cilium eBPF CNI.
+Automated deployment of a High-Availability, multi-control-plane (`NUM_CP >= 3`) and optional dedicated worker (`NUM_WORKER`) Kubernetes cluster running inside system containers (**Incus** or **LXD**) with `kube-vip` (virtual IP) and Cilium eBPF CNI.
 
 ---
 
@@ -15,11 +15,11 @@ Initial inspiration for this project came from [justmeandopensource/kubernetes (
 - **Unified Multi-Engine Master Script**:
   - **Incus** (default): Native APT packages, Apache 2.0 license, community-governed.
   - **LXD**: Canonical snap-based deployment via `-c lxd`.
-- **High Availability**: 3 control plane nodes with `kube-vip` virtual IP failover (`10.67.38.40`).
+- **High Availability & Scalable Topology**: Configurable multi-control-plane (`NUM_CP >= 3`) and optional dedicated worker (`NUM_WORKER`) topology with `kube-vip` virtual IP failover (`10.67.38.250`).
 - **Modern Networking & CNI**: Cilium eBPF CNI with Hubble network observability.
 - **Configurable Inventory**: Centralized configuration in `inventory.txt` (Node static IPs, Ubuntu release, Kubernetes, Cilium).
 - **Firewall Coexistence**: Idempotent iptables rules allowing Docker and container bridges (`incusbr0` / `lxdbr0`) to coexist seamlessly.
-- **Automated Provisioning**: End-to-end scripted workflow covering system container launch, SSH key injection, container runtime (`containerd`), `kubeadm` bootstrap, join automation, and verification.
+- **Self-Contained Deployment**: Master script `deploy_k8s.sh` contains all orchestration, container setup, runtime installation, node cloning, host tooling, and firewall configuration inline with zero external script dependencies.
 
 ---
 
@@ -33,7 +33,7 @@ NUM_CP=3
 NUM_WORKER=2
 
 # Virtual IP (kube-vip control plane endpoint)
-VIP="10.67.38.40"
+VIP="10.67.38.250"
 
 # Bridge Network Gateway IPs
 BRIDGE_IPV4="10.67.38.1"
@@ -85,4 +85,6 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | `kubeadm-join-cp-config.yaml` | Parameterized kubeadm join configuration for secondary control planes |
 | `kubeadm-join-worker-config.yaml` | Parameterized kubeadm join configuration for worker nodes |
 | `cilium-deploy.yaml` | Helm values configuration for Cilium CNI installation |
+| `dnsutils.yaml` | DNS verification testing pod manifest |
 | `steps.txt` | Unified step-by-step manual guide for Incus and LXD |
+| `WALKTHROUGH.md` | Detailed architectural overview and live verification report |
