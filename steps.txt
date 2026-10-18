@@ -54,11 +54,17 @@ EOF
    - For LXD:
      sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/snap/lxd/common/lxd/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config | lxd init --preseed
 
-7. Configure Docker and bridge iptables coexistence:
+7. Configure Docker and bridge iptables coexistence (if Docker is running):
    - For Incus:
-     bash docker_iptables.sh incusbr0
+     sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
+     sudo iptables -I DOCKER-USER -o incusbr0 -j ACCEPT
+     sudo iptables -t nat -A POSTROUTING -s 10.67.38.0/24 ! -d 10.67.38.0/24 -j MASQUERADE
+     sudo netfilter-persistent save
    - For LXD:
-     bash docker_iptables.sh lxdbr0
+     sudo iptables -I DOCKER-USER -i lxdbr0 -j ACCEPT
+     sudo iptables -I DOCKER-USER -o lxdbr0 -j ACCEPT
+     sudo iptables -t nat -A POSTROUTING -s 10.67.38.0/24 ! -d 10.67.38.0/24 -j MASQUERADE
+     sudo netfilter-persistent save
 
 8. Create and configure container profile 'k8s':
    - For Incus:
@@ -184,10 +190,10 @@ EOF
       iii) Exit out of node back to host machine.
 
 19. Install host tools:
-    On the host machine, run:
-      bash cilium_cli_install.sh
-      bash helm_install.sh
-      bash kubectl_install.sh
+    On the host machine, install:
+      - Cilium CLI (from official GitHub release)
+      - Helm (from Buildkite APT repository)
+      - Kubectl (from official Kubernetes APT repository)
 
 20. Remove control-plane taints from control plane nodes:
     Run on host for each control plane node:

@@ -80,11 +80,9 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | `inventory.txt` | Cluster inventory: Node static IPs, Ubuntu OS version, and Kubernetes / Cilium versions |
 | `deploy_k8s.sh` | Master deployment script with `-c incus\|lxd` option support |
 | `setup_ssh_nodes.sh` | Container user, passwordless sudo, and SSH key setup for Incus and LXD |
-| `docker_iptables.sh` | Firewall rules for container bridge and Docker coexistence |
 | `container-engine-init-config` | Parameterized container engine preseed configuration |
 | `k8s-container-profile-config` | Parameterized container profile for Kubernetes |
 | `containerd_install.sh` | Container runtime installation script |
 | `kubeadm_install.sh` | Kubernetes node components installation script |
-| `kubectl_install.sh` | Host `kubectl` installation script |
 | `kube-vip.sh` | `kube-vip` static pod manifest generator |
 | `steps.txt` | Unified step-by-step manual guide for Incus and LXD |

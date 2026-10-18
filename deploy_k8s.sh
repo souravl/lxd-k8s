@@ -345,15 +345,35 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 7: Run docker_iptables.sh for bridge firewall coexistence
+# Step 7: Configure firewall rules for container bridge and Docker coexistence
 # ------------------------------------------------------------------------------
-step_header "7" "Run docker_iptables.sh"
-if [ -f "${SCRIPT_DIR}/docker_iptables.sh" ]; then
-    BRIDGE_SUBNET="${BRIDGE_IPV4%.*}.0/24"
-    bash "${SCRIPT_DIR}/docker_iptables.sh" "$BRIDGE" "$BRIDGE_SUBNET"
+step_header "7" "Configure bridge firewall and Docker coexistence"
+BRIDGE_SUBNET="${BRIDGE_IPV4%.*}.0/24"
+if systemctl is-active --quiet docker; then
+    info "Docker detected. Configuring idempotent iptables rules for bridge '${BRIDGE}'..."
+
+    # i. Allow container outbound traffic through Docker's chain
+    if ! sudo iptables -C DOCKER-USER -i "$BRIDGE" -j ACCEPT 2>/dev/null; then
+        sudo iptables -I DOCKER-USER -i "$BRIDGE" -j ACCEPT
+    fi
+
+    # ii. Allow return internet traffic back into container bridge
+    if ! sudo iptables -C DOCKER-USER -o "$BRIDGE" -j ACCEPT 2>/dev/null; then
+        sudo iptables -I DOCKER-USER -o "$BRIDGE" -j ACCEPT
+    fi
+
+    # iii. Enable internet NAT translation for the container subnet
+    if ! sudo iptables -t nat -C POSTROUTING -s "$BRIDGE_SUBNET" ! -d "$BRIDGE_SUBNET" -j MASQUERADE 2>/dev/null; then
+        sudo iptables -t nat -A POSTROUTING -s "$BRIDGE_SUBNET" ! -d "$BRIDGE_SUBNET" -j MASQUERADE
+    fi
+
+    # iv. Save the rules persistently without prompting the user
+    info "Saving firewall rules..."
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent
+    sudo netfilter-persistent save
+    success "Firewall rules for '${BRIDGE}' configured and saved."
 else
-    error "File ${SCRIPT_DIR}/docker_iptables.sh not found!"
-    exit 1
+    info "Docker is not active. Skipping firewall adjustments."
 fi
 
 # ------------------------------------------------------------------------------
@@ -702,25 +722,70 @@ fi
 # Step 19: Install cilium CLI, helm, and kubectl on host
 # ------------------------------------------------------------------------------
 step_header "19" "Install cilium CLI, Helm, and Kubectl on host"
+
+# i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
     info "Cilium CLI is already installed ($(command -v cilium)). Skipping."
 else
-    info "Running cilium_cli_install.sh..."
-    bash "${SCRIPT_DIR}/cilium_cli_install.sh"
+    info "Installing Cilium CLI on host..."
+    CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+    CLI_ARCH=amd64
+    if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+
+    info "Downloading Cilium CLI ${CILIUM_CLI_VERSION} (${CLI_ARCH})..."
+    TMP_CILIUM_DIR=$(mktemp -d)
+    curl -L --fail --progress-bar "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz" -o "${TMP_CILIUM_DIR}/cilium-linux-${CLI_ARCH}.tar.gz"
+    curl -L --fail -s "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz.sha256sum" -o "${TMP_CILIUM_DIR}/cilium-linux-${CLI_ARCH}.tar.gz.sha256sum"
+
+    info "Verifying SHA256 checksum..."
+    (cd "$TMP_CILIUM_DIR" && sha256sum --check "cilium-linux-${CLI_ARCH}.tar.gz.sha256sum" >/dev/null)
+
+    info "Extracting cilium binary to /usr/local/bin..."
+    sudo tar xzvfC "${TMP_CILIUM_DIR}/cilium-linux-${CLI_ARCH}.tar.gz" /usr/local/bin
+    rm -rf "$TMP_CILIUM_DIR"
+    success "Cilium CLI ${CILIUM_CLI_VERSION} installed successfully."
 fi
 
+# ii) Helm
 if command -v helm >/dev/null 2>&1; then
     info "Helm is already installed ($(command -v helm)). Skipping."
 else
-    info "Running helm_install.sh..."
-    bash "${SCRIPT_DIR}/helm_install.sh"
+    info "Installing Helm on host via APT..."
+    HELM_BUILDKITE_APT_KEY_ID="DDF78C3E6EBB2D2CC223C95C62BA89D07698DBC6"
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq curl gpg apt-transport-https
+
+    TMP_HELM_GPG=$(mktemp)
+    curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey > "$TMP_HELM_GPG"
+    if [ "$(gpg --show-keys --with-colons "$TMP_HELM_GPG" | awk -F: '$1 == "fpr" {print $10}' | head -n 1)" != "${HELM_BUILDKITE_APT_KEY_ID}" ]; then
+        error "Unexpected Helm APT key ID: potential key compromise"
+        rm -f "$TMP_HELM_GPG"
+        exit 1
+    fi
+
+    cat "$TMP_HELM_GPG" | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null
+    rm -f "$TMP_HELM_GPG"
+    echo "deb [signed-by=/usr/share/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+
+    sudo apt-get update -qq
+    sudo apt-get install -y helm
+    success "Helm installed successfully."
 fi
 
+# iii) Kubectl
 if command -v kubectl >/dev/null 2>&1; then
     info "Kubectl is already installed ($(command -v kubectl)). Skipping."
 else
-    info "Running kubectl_install.sh..."
-    bash "${SCRIPT_DIR}/kubectl_install.sh"
+    info "Installing Kubectl (${KUBERNETES_VERSION}) on host via APT..."
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq apt-transport-https ca-certificates curl gpg
+    sudo mkdir -p /etc/apt/keyrings
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+    sudo apt-get update -qq
+    sudo apt-get install -y kubectl
+    sudo apt-mark hold kubectl
+    success "Kubectl installed successfully."
 fi
 success "Host tooling ready."
 
