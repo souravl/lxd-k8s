@@ -79,7 +79,6 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | :--- | :--- |
 | `inventory.txt` | Cluster inventory: Node static IPs, Ubuntu OS version, and Kubernetes / Cilium versions |
 | `deploy_k8s.sh` | Master deployment script with `-c incus\|lxd` option support |
-| `setup_ssh_nodes.sh` | Container user, passwordless sudo, and SSH key setup for Incus and LXD |
 | `container-engine-init-config` | Parameterized container engine preseed configuration |
 | `k8s-container-profile-config` | Parameterized container profile for Kubernetes |
 | `kubeadm-init-config.yaml` | Parameterized kubeadm init configuration for bootstrap control plane |

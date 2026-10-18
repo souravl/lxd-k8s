@@ -410,10 +410,113 @@ if [ "$STATE" != "RUNNING" ]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Step 10: Run setup_ssh_nodes.sh for ssh setup
+# Step 10: Configure SSH, user, and /etc/hosts on node1
 # ------------------------------------------------------------------------------
-step_header "10" "Run setup_ssh_nodes.sh on node1"
-CONTAINER_CMD="$CONTAINER_CMD" TARGET_NODES="node1" bash "${SCRIPT_DIR}/setup_ssh_nodes.sh" "${HOSTS_ENTRIES[@]}"
+step_header "10" "Configure SSH, user, and /etc/hosts on node1"
+
+# i) Locate or generate Host SSH Public Key
+SSH_PUB_KEY=""
+if [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
+    SSH_PUB_KEY="$HOME/.ssh/id_ed25519.pub"
+elif [ -f "$HOME/.ssh/id_rsa.pub" ]; then
+    SSH_PUB_KEY="$HOME/.ssh/id_rsa.pub"
+else
+    info "No SSH public key found in ~/.ssh/ (id_ed25519.pub or id_rsa.pub)."
+    info "Generating new SSH key ('ssh-keygen -t ed25519')..."
+    mkdir -p ~/.ssh
+    chmod 700 ~/.ssh
+    ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+    SSH_PUB_KEY="$HOME/.ssh/id_ed25519.pub"
+fi
+info "Using SSH public key: $SSH_PUB_KEY"
+
+# ii) Check if passwordless SSH is already operational on node1
+if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=2 "${SSH_USER}@node1" "true" 2>/dev/null; then
+    info "Passwordless SSH access is already operational on node1. Skipping container user setup."
+else
+    # Obtain password for SSH_USER inside containers
+    if [ -n "${CONTAINER_PASS:-}" ]; then
+        USER_PASS="$CONTAINER_PASS"
+    else
+        read -rsp "Enter password for user '${SSH_USER}' inside containers: " USER_PASS
+        echo
+        read -rsp "Confirm password: " USER_PASS_CONFIRM
+        echo
+        if [ "$USER_PASS" != "$USER_PASS_CONFIRM" ]; then
+            error "Passwords do not match!"
+            exit 1
+        fi
+    fi
+
+    # Ensure node1 is running
+    STATE=$($CONTAINER_CMD info node1 | awk '/^Status:/ {print $2}')
+    if [ "$STATE" != "RUNNING" ]; then
+        info "Starting container node1..."
+        $CONTAINER_CMD start node1
+    fi
+
+    # Wait up to 30 seconds for DNS & network readiness
+    MAX_WAIT=30
+    COUNT=0
+    info "Waiting for DNS & network readiness on node1 (timeout: ${MAX_WAIT}s)..."
+    until $CONTAINER_CMD exec node1 -- getent hosts archive.ubuntu.com >/dev/null 2>&1; do
+        COUNT=$((COUNT + 1))
+        if [ "$COUNT" -ge "$MAX_WAIT" ]; then
+            error "DNS/Network timeout on container 'node1' after ${MAX_WAIT}s. Aborting."
+            exit 1
+        fi
+        sleep 1
+    done
+
+    # Create user '${SSH_USER}' if it doesn't exist
+    if ! $CONTAINER_CMD exec node1 -- id -u "${SSH_USER}" >/dev/null 2>&1; then
+        info "Creating user '${SSH_USER}' on node1..."
+        $CONTAINER_CMD exec node1 -- useradd -m -s /bin/bash "${SSH_USER}"
+        $CONTAINER_CMD exec node1 -- usermod -aG sudo "${SSH_USER}"
+    else
+        info "User '${SSH_USER}' already exists on node1."
+    fi
+
+    # Set password for '${SSH_USER}'
+    info "Setting password for '${SSH_USER}' on node1..."
+    echo "${SSH_USER}:$USER_PASS" | $CONTAINER_CMD exec node1 -- chpasswd
+
+    # Configure passwordless sudo for '${SSH_USER}'
+    info "Configuring passwordless sudo for '${SSH_USER}' on node1..."
+    $CONTAINER_CMD exec node1 -- bash -c "mkdir -p /etc/sudoers.d && echo '${SSH_USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-${SSH_USER}"
+    $CONTAINER_CMD exec node1 -- chmod 440 "/etc/sudoers.d/90-${SSH_USER}"
+
+    # Set up SSH directory and inject authorized_keys
+    info "Injecting SSH public key into node1..."
+    $CONTAINER_CMD exec node1 -- mkdir -p "/home/${SSH_USER}/.ssh"
+    $CONTAINER_CMD file push "$SSH_PUB_KEY" "node1/home/${SSH_USER}/.ssh/authorized_keys"
+    $CONTAINER_CMD exec node1 -- chown -R "${SSH_USER}:${SSH_USER}" "/home/${SSH_USER}/.ssh"
+    $CONTAINER_CMD exec node1 -- chmod 700 "/home/${SSH_USER}/.ssh"
+    $CONTAINER_CMD exec node1 -- chmod 600 "/home/${SSH_USER}/.ssh/authorized_keys"
+
+    # Ensure OpenSSH server is installed and running
+    info "Installing and enabling OpenSSH server on node1..."
+    $CONTAINER_CMD exec node1 -- apt-get update -qq
+    $CONTAINER_CMD exec node1 -- apt-get install -y -qq openssh-server
+    $CONTAINER_CMD exec node1 -- systemctl enable --now ssh
+fi
+
+# iii) Update /etc/hosts on host and inside node1
+info "Updating host /etc/hosts with cluster node mappings..."
+for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+    IP=$(echo "$ENTRY" | awk '{print $1}')
+    NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
+    sudo sed -i -E "/[[:space:]]${NODE_NAME}([[:space:]]|$)/d" /etc/hosts
+    echo -e "${IP}\t${NODE_NAME}" | sudo tee -a /etc/hosts >/dev/null
+done
+
+info "Updating /etc/hosts inside node1..."
+for ENTRY in "${HOSTS_ENTRIES[@]}"; do
+    IP=$(echo "$ENTRY" | awk '{print $1}')
+    NODE_NAME=$(echo "$ENTRY" | awk '{print $2}')
+    $CONTAINER_CMD exec node1 -- bash -c "sed -i -E '/[[:space:]]${NODE_NAME}([[:space:]]|$)/d' /etc/hosts && echo -e '${IP}\t${NODE_NAME}' >> /etc/hosts"
+done
+success "node1 SSH and /etc/hosts configuration complete."
 
 # ------------------------------------------------------------------------------
 # Step 11: Configure containerd & kubeadm on node1

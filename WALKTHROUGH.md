@@ -31,12 +31,7 @@ We have automated and verified the deployment of a High-Availability, multi-cont
     - Checks if `/etc/kubernetes/admin.conf` already exists before attempting `kubeadm init`, preventing preflight conflicts on re-runs.
   - Automatically handles in-session group activation via `exec sg incus-admin` or `exec sg lxd`, preserving all command-line arguments.
 
-### 2. Unified Supporting Scripts & Profiles
-- **[`setup_ssh_nodes.sh`](setup_ssh_nodes.sh)**:
-  - Unified script replacing engine-specific variants; uses `$CONTAINER_CMD` (`incus` or `lxc`).
-  - Prunes stale cluster host keys from `$HOME/.ssh/known_hosts`.
-  - Supports `CONTAINER_PASS` environment variable and passwordless SSH detection.
-  - Synchronized with `inventory.txt` validation (`NUM_CP >= 3`, `NUM_WORKER`, and sequential node IP checks).
+### 2. Unified Configurations & Profiles
 - **[`inventory.txt`](inventory.txt)**:
   - Centralized cluster inventory declaring `NUM_CP`, `NUM_WORKER`, `VIP`, bridge network gateways, static node IPs, container resource limits, and software versions (`UBUNTU_VERSION="24.04"`, `KUBERNETES_VERSION="v1.37"`, `CILIUM_VERSION="1.20.2"`).
 - **Unified Parameterized Configurations**:
@@ -62,7 +57,7 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 | **7** | Docker firewall coexistence | Inlined check for active Docker daemon; applies idempotent bridge forward and MASQUERADE rules to `DOCKER-USER` and `POSTROUTING` chains and saves with `netfilter-persistent`. |
 | **8** | Container `k8s` profile | Creates profile `k8s` and configures it with parameterized `k8s-container-profile-config`. |
 | **9** | Launch node1 | Launches only `node1` using profile `k8s` and static IP `NODE1_IP`. |
-| **10** | SSH & node setup | Invokes `setup_ssh_nodes.sh` to configure user, sudoers, and authorized keys on `node1`. |
+| **10** | SSH & node setup | Inlined setup of host SSH public key, passwordless sudo, OpenSSH server, and `/etc/hosts` resolution on `node1`. |
 | **11** | Runtime & Kubeadm | Directly installs containerd and Kubernetes packages on `node1` over SSH, configures `config.toml`, and pre-pulls pause image. |
 | **12** | Clone remaining nodes | Stops `node1`, clones all remaining nodes (`node2` .. `node${TOTAL_NODES}`) via `incus copy` / `lxc copy`, sets static IPs, starts nodes, sets hostnames, regenerates `/etc/machine-id`, and verifies SSH. |
 | **13** | Node 1 Bootstrap | Directly generates `kube-vip.yaml` manifest on `node1`, temporarily adjusts `hostPath` to `super-admin.conf`, initializes control plane with `kubeadm init --upload-certs`, parses join token, CA hash, and cert-key, configures local `$HOME/.kube/config`, reverts `hostPath` to `admin.conf`, bounces `kube-vip` static pod using CRI, and verifies API server response. |
