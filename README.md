@@ -79,8 +79,8 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | :--- | :--- |
 | `inventory.txt` | Cluster inventory: Node static IPs, Ubuntu OS version, and Kubernetes / Cilium versions |
 | `deploy_k8s.sh` | Master deployment script with `-c incus\|lxd` option support |
-| `container-engine-init-config` | Parameterized container engine preseed configuration |
-| `k8s-container-profile-config` | Parameterized container profile for Kubernetes |
+| `container-engine-init-config.yaml` | Parameterized container engine preseed configuration |
+| `k8s-container-profile-config.yaml` | Parameterized container profile for Kubernetes |
 | `kubeadm-init-config.yaml` | Parameterized kubeadm init configuration for bootstrap control plane |
 | `kubeadm-join-cp-config.yaml` | Parameterized kubeadm join configuration for secondary control planes |
 | `kubeadm-join-worker-config.yaml` | Parameterized kubeadm join configuration for worker nodes |

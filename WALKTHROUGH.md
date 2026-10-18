@@ -35,8 +35,8 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 - **[`inventory.txt`](inventory.txt)**:
   - Centralized cluster inventory declaring `NUM_CP`, `NUM_WORKER`, `VIP`, bridge network gateways, static node IPs, container resource limits, and software versions (`UBUNTU_VERSION="24.04"`, `KUBERNETES_VERSION="v1.37"`, `CILIUM_VERSION="1.20.2"`).
 - **Unified Parameterized Configurations**:
-  - `container-engine-init-config`: Preseed initialization config parameterizing bridge and storage pool directory.
-  - `k8s-container-profile-config`: Profile configuration parameterizing bridge, CPU, and memory limits.
+  - `container-engine-init-config.yaml`: Preseed initialization config parameterizing bridge and storage pool directory.
+  - `k8s-container-profile-config.yaml`: Profile configuration parameterizing bridge, CPU, and memory limits.
   - `kubeadm-join-cp-config.yaml`: Parameterized control-plane join configuration.
   - `kubeadm-join-worker-config.yaml`: Parameterized worker-node join configuration.
 - **[`steps.txt`](steps.txt)**:
@@ -53,9 +53,9 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 | **3** | UFW disable | Checks if `ufw` command is present and disables it (`sudo ufw disable`). |
 | **4** | Kernel modules | Writes `overlay`, `br_netfilter`, `nf_conntrack` to `/etc/modules-load.d/k8s.conf` and loads with `modprobe`. |
 | **5** | Sysctl config | Writes bridge netfilter and `ip_forward=1` to `/etc/sysctl.d/99-k8s.conf` and applies with `sysctl --system`. |
-| **6** | Engine initialization | Runs preseed initialization with parameterized `container-engine-init-config`. |
+| **6** | Engine initialization | Runs preseed initialization with parameterized `container-engine-init-config.yaml`. |
 | **7** | Docker firewall coexistence | Inlined check for active Docker daemon; applies idempotent bridge forward and MASQUERADE rules to `DOCKER-USER` and `POSTROUTING` chains and saves with `netfilter-persistent`. |
-| **8** | Container `k8s` profile | Creates profile `k8s` and configures it with parameterized `k8s-container-profile-config`. |
+| **8** | Container `k8s` profile | Creates profile `k8s` and configures it with parameterized `k8s-container-profile-config.yaml`. |
 | **9** | Launch node1 | Launches only `node1` using profile `k8s` and static IP `NODE1_IP`. |
 | **10** | SSH & node setup | Inlined setup of host SSH public key, passwordless sudo, OpenSSH server, and `/etc/hosts` resolution on `node1`. |
 | **11** | Runtime & Kubeadm | Directly installs containerd and Kubernetes packages on `node1` over SSH, configures `config.toml`, and pre-pulls pause image. |

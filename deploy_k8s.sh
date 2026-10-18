@@ -331,15 +331,15 @@ sudo sysctl --system
 # ------------------------------------------------------------------------------
 # Step 6: Initialize container engine with preseed configuration
 # ------------------------------------------------------------------------------
-step_header "6" "Initialize ${ENGINE_NAME} with container-engine-init-config"
+step_header "6" "Initialize ${ENGINE_NAME} with container-engine-init-config.yaml"
 if ! $CONTAINER_CMD network show "$BRIDGE" >/dev/null 2>&1; then
-    info "Applying parameterized container-engine-init-config preseed..."
+    info "Applying parameterized container-engine-init-config.yaml preseed..."
     sed \
         -e "s|\${BRIDGE}|${BRIDGE}|g" \
         -e "s|\${STORAGE_POOL_DIR}|${STORAGE_POOL_DIR}|g" \
         -e "s|\${BRIDGE_IPV4}|${BRIDGE_IPV4}|g" \
         -e "s|\${BRIDGE_IPV6}|${BRIDGE_IPV6}|g" \
-        "${SCRIPT_DIR}/container-engine-init-config" | $INIT_CMD --preseed
+        "${SCRIPT_DIR}/container-engine-init-config.yaml" | $INIT_CMD --preseed
 else
     info "${ENGINE_NAME} bridge '${BRIDGE}' already exists. Skipping preseed."
 fi
@@ -384,12 +384,12 @@ if ! $CONTAINER_CMD profile list | grep -qw "k8s"; then
     info "Creating profile 'k8s'..."
     $CONTAINER_CMD profile create k8s
 fi
-info "Applying parameterized k8s-container-profile-config to profile 'k8s'..."
+info "Applying parameterized k8s-container-profile-config.yaml to profile 'k8s'..."
 sed \
     -e "s|\${BRIDGE}|${BRIDGE}|g" \
     -e "s|\${LIMITS_CPU}|${LIMITS_CPU}|g" \
     -e "s|\${LIMITS_MEMORY}|${LIMITS_MEMORY}|g" \
-    "${SCRIPT_DIR}/k8s-container-profile-config" | $CONTAINER_CMD profile edit k8s
+    "${SCRIPT_DIR}/k8s-container-profile-config.yaml" | $CONTAINER_CMD profile edit k8s
 
 # ------------------------------------------------------------------------------
 # Step 9: Launch container node1

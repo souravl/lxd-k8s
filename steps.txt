@@ -50,9 +50,9 @@ EOF
 
 6. Initialize container engine with preseed configuration:
    - For Incus:
-     sed -e 's|\${BRIDGE}|incusbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/lib/incus/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config | incus admin init --preseed
+     sed -e 's|\${BRIDGE}|incusbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/lib/incus/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config.yaml | incus admin init --preseed
    - For LXD:
-     sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/snap/lxd/common/lxd/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config | lxd init --preseed
+     sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${STORAGE_POOL_DIR}|/var/snap/lxd/common/lxd/storage-pools/default|g' -e 's|\${BRIDGE_IPV4}|10.67.38.1|g' -e 's|\${BRIDGE_IPV6}|fd42:51e5:ef75:abeb::1|g' container-engine-init-config.yaml | lxd init --preseed
 
 7. Configure Docker and bridge iptables coexistence (if Docker is running):
    - For Incus:
@@ -69,10 +69,10 @@ EOF
 8. Create and configure container profile 'k8s':
    - For Incus:
      incus profile create k8s 2>/dev/null || true
-     sed -e 's|\${BRIDGE}|incusbr0|g' -e 's|\${LIMITS_CPU}|4|g' -e 's|\${LIMITS_MEMORY}|4GB|g' k8s-container-profile-config | incus profile edit k8s
+     sed -e 's|\${BRIDGE}|incusbr0|g' -e 's|\${LIMITS_CPU}|4|g' -e 's|\${LIMITS_MEMORY}|4GB|g' k8s-container-profile-config.yaml | incus profile edit k8s
    - For LXD:
      lxc profile create k8s 2>/dev/null || true
-     sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${LIMITS_CPU}|4|g' -e 's|\${LIMITS_MEMORY}|4GB|g' k8s-container-profile-config | lxc profile edit k8s
+     sed -e 's|\${BRIDGE}|lxdbr0|g' -e 's|\${LIMITS_CPU}|4|g' -e 's|\${LIMITS_MEMORY}|4GB|g' k8s-container-profile-config.yaml | lxc profile edit k8s
 
 9. Launch and start container (node1):
    - For Incus:
