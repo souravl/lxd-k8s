@@ -689,10 +689,11 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "VIP='${VIP}' bash -s" <<'EOF'
         --controlplane \
         --services \
         --arp \
-        --leaderElection | sudo tee /etc/kubernetes/manifests/kube-vip.yaml >/dev/null
+        --leaderElection < /dev/null | sudo tee /tmp/kube-vip.yaml >/dev/null
 
-    # Temporarily point kube-vip to super-admin.conf for initial bootstrap
-    sudo sed -i "s|path: /etc/kubernetes/admin.conf|path: /etc/kubernetes/super-admin.conf|g" /etc/kubernetes/manifests/kube-vip.yaml
+    # Temporarily point kube-vip to super-admin.conf for initial bootstrap before placing in manifests
+    sudo sed -i "s|path: /etc/kubernetes/admin.conf|path: /etc/kubernetes/super-admin.conf|g" /tmp/kube-vip.yaml
+    sudo cp -f /tmp/kube-vip.yaml /etc/kubernetes/manifests/kube-vip.yaml
 EOF
 
 # Generate dynamic certSANs list for all control plane nodes (1 .. NUM_CP)
@@ -732,7 +733,7 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "
 # Parse token, ca-cert-hash, and certificate-key directly from node1
 info "Extracting join credentials and certificates from node1..."
 JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "
-    sudo kubeadm token list 2>/dev/null | awk '\$3 ~ /authentication/ {print \$1; exit}'
+    sudo kubeadm token list 2>/dev/null | awk '/authentication/ {print \$1; exit}'
 ")
 if [ -z "$JOIN_TOKEN" ]; then
     JOIN_TOKEN=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo kubeadm token create --print-join-command 2>/dev/null | awk '{print \$5}'")
@@ -811,10 +812,14 @@ for NODE in "${CP_JOIN_NODES[@]}"; do
 
     info "Executing kubeadm join on $NODE..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
-        sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
-        mkdir -p $HOME/.kube
-        sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
-        sudo chown $(id -u):$(id -g) $HOME/.kube/config
+        if [ ! -f /etc/kubernetes/admin.conf ]; then
+            sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
+            mkdir -p $HOME/.kube
+            sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
+            sudo chown $(id -u):$(id -g) $HOME/.kube/config
+        else
+            echo "Control plane node has already joined."
+        fi
     '
     success "$NODE joined control plane successfully."
 done
@@ -856,7 +861,11 @@ if [ "${#WORKER_NODES[@]}" -gt 0 ]; then
 
         info "Executing kubeadm join on $NODE..."
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
-            sudo kubeadm join --config ./kubeadm-join-worker-config.yaml --ignore-preflight-errors=SystemVerification
+            if [ ! -f /etc/kubernetes/kubelet.conf ]; then
+                sudo kubeadm join --config ./kubeadm-join-worker-config.yaml --ignore-preflight-errors=SystemVerification
+            else
+                echo "Worker node has already joined."
+            fi
         '
         success "$NODE joined as worker node successfully."
     done

@@ -8,6 +8,11 @@ nodeRegistration:
   kubeletExtraArgs:
     - name: node-ip
       value: ${NODE1_IP}
+timeouts:
+  controlPlaneComponentHealthCheck: 5m0s
+  kubeletHealthCheck: 4m0s
+  kubernetesAPICall: 5m0s
+  etcdAPICall: 3m0s
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration

@@ -10,3 +10,8 @@ discovery:
     token: "${JOIN_TOKEN}"
     apiServerEndpoint: "${VIP}:6443"
     caCertHashes: ["sha256:${CA_CERT_HASH}"]
+timeouts:
+  kubeletHealthCheck: 4m0s
+  kubernetesAPICall: 5m0s
+  tlsBootstrap: 5m0s
+  discovery: 5m0s

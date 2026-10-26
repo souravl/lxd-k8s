@@ -1,0 +1,317 @@
+# ==============================================================================
+# High-Availability Kubernetes Cluster on libvirt (KVM VMs) - Step-by-Step Guide
+# Note: Add 'sudo' where needed. The user is expected to provide sudo password.
+# The steps below illustrate a 3-node cluster example (node1, node2, node3),
+# but the actual number of control plane and worker nodes (NUM_CP, NUM_WORKER),
+# static IP addresses (VIP, BRIDGE_IPV4, NODE1_IP, NODE2_IP, ...), hardware sizing
+# (LIMITS_CPU, LIMITS_MEMORY, LIMITS_DISK), Ubuntu release (UBUNTU_VERSION),
+# and software versions (KUBERNETES_VERSION, CILIUM_VERSION) are configured in 'inventory.txt'.
+# ==============================================================================
+
+1. Install Hypervisor & Virtualization Tools:
+   - Install QEMU/KVM, libvirt, virtinst, and cloud tools on the host:
+     sudo apt-get update
+     sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools
+   - Ensure the libvirt service is enabled and running:
+     sudo systemctl enable --now libvirtd
+
+2. Configure Group Membership:
+   - Add current user to libvirt and kvm groups:
+     sudo usermod -aG libvirt,kvm $USER
+     (Activate group in current shell without logout: newgrp libvirt)
+   - Ensure virsh defaults to the system daemon (qemu:///system):
+     echo 'export LIBVIRT_DEFAULT_URI="qemu:///system"' >> ~/.bashrc
+     export LIBVIRT_DEFAULT_URI="qemu:///system"
+
+3. Disable UFW on host machine if present:
+   sudo ufw disable
+
+4. Configure kernel modules on host:
+   - Load host network acceleration module for KVM:
+     sudo tee /etc/modules-load.d/k8s-libvirt.conf <<EOF
+vhost_net
+EOF
+     sudo modprobe vhost_net
+   (Note: Kubernetes networking modules like 'overlay' and 'br_netfilter' run inside the VM guest OS and will be configured in Step 11).
+
+5. Configure sysctl settings on host:
+   - Ensure IP forwarding is enabled on the host for bridge NAT routing:
+     sudo tee /etc/sysctl.d/99-k8s-libvirt.conf <<EOF
+net.ipv4.ip_forward = 1
+EOF
+     sudo sysctl --system
+
+6. Update libvirt 'default' network (virbr0) configuration:
+   - If 'default' network is not already defined in libvirt, define it from template:
+     virsh net-info default >/dev/null 2>&1 || sudo virsh net-define /etc/libvirt/qemu/networks/default.xml
+   - Export current default network definition:
+     virsh net-dumpxml default > default-net.xml
+   - Update the gateway IP and dynamic DHCP range in place (keeps virbr0, NAT mode, and bridge settings):
+     sed -i 's|192.168.122.1|10.67.38.1|g' default-net.xml
+     sed -i 's|192.168.122.2|10.67.38.100|g' default-net.xml
+     sed -i 's|192.168.122.254|10.67.38.200|g' default-net.xml
+   - Redefine and restart the network once:
+     virsh net-define default-net.xml
+     virsh net-destroy default
+     virsh net-start default
+     virsh net-autostart default
+   (Note: Node static IPs are NOT hardcoded here; they are registered dynamically at VM creation time in Steps 9 and 12).
+
+7. Configure Docker and bridge iptables coexistence (if Docker is running):
+   - Add rules for virbr0 to DOCKER-USER chain and ensure NAT masquerading:
+     sudo iptables -I DOCKER-USER -i virbr0 -j ACCEPT
+     sudo iptables -I DOCKER-USER -o virbr0 -j ACCEPT
+     sudo iptables -t nat -A POSTROUTING -s 10.67.38.0/24 ! -d 10.67.38.0/24 -j MASQUERADE
+     sudo netfilter-persistent save
+
+8. Download base Ubuntu Cloud Image & prepare directories:
+   - Create local directory for cached base cloud images:
+     mkdir -p ./images
+   - Download Ubuntu 24.04 server cloud image (qcow2 format) if not already present:
+     if [ ! -f ./images/ubuntu-24.04-base.qcow2 ]; then
+         curl -L -o ./images/ubuntu-24.04-base.qcow2 https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+     fi
+
+9. Launch and start VM (node1):
+   - i)   Register node1 static DHCP reservation in libvirt at VM creation time:
+          sudo virsh net-update default add ip-dhcp-host "<host mac='52:54:00:10:00:0a' name='node1' ip='10.67.38.10'/>" --live --config
+          (Note: The last MAC octet '0a' is the hexadecimal equivalent of the IP's 4th octet '10').
+   - ii)  Create node1 disk in /var/lib/libvirt/images/ from base image and resize to $LIMITS_DISK (e.g. 20G):
+          sudo cp ./images/ubuntu-24.04-base.qcow2 /var/lib/libvirt/images/node1.qcow2
+          sudo qemu-img resize /var/lib/libvirt/images/node1.qcow2 20G
+   - iii) Prepare cloud-init user-data file with $USER, passwordless sudo, and public SSH key:
+          SSH_PUB_KEY=$(cat ~/.ssh/id_ed25519.pub 2>/dev/null || cat ~/.ssh/id_rsa.pub)
+          cat <<EOF > cloud-init-user-data.yaml
+#cloud-config
+hostname: node1
+fqdn: node1
+users:
+  - name: $USER
+    gecos: $USER
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - $SSH_PUB_KEY
+EOF
+   - iv)  Launch node1 using virt-install:
+          virt-install \
+            --name node1 \
+            --vcpus 4 \
+            --memory 4096 \
+            --os-variant ubuntu24.04 \
+            --disk path=/var/lib/libvirt/images/node1.qcow2,format=qcow2,bus=virtio,cache=none \
+            --network network=default,model=virtio,mac=52:54:00:10:00:0a \
+            --cloud-init user-data=./cloud-init-user-data.yaml \
+            --import \
+            --noautoconsole
+   - v)   Wait for node1 to finish booting and become reachable over SSH:
+          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@10.67.38.10" "true" 2>/dev/null; do
+              sleep 2
+          done
+
+10. Configure /etc/hosts on host and inside node1:
+    - Map node IPs in /etc/hosts on both the host and inside node1:
+      echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3" | sudo tee -a /etc/hosts
+      ssh "$USER@node1" 'echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3" | sudo tee -a /etc/hosts'
+
+11. On node1 (Prepare Golden Node: OS update, containerd, and Kubernetes packages):
+    i)   Update and upgrade all OS packages:
+         sudo apt-get update && sudo apt-get upgrade -y
+
+    ii)  Disable UFW firewall and disable swap:
+         sudo ufw disable 2>/dev/null || true
+         sudo swapoff -a
+         sudo sed -i '/\sswap\s/s/^/#/' /etc/fstab
+
+    iii) Configure kernel modules inside node1:
+         sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+         sudo modprobe overlay
+         sudo modprobe br_netfilter
+
+    iv)  Configure sysctl settings inside node1:
+         sudo tee /etc/sysctl.d/99-k8s.conf <<EOF
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+         sudo sysctl --system
+
+    v)   Install containerd and qemu-guest-agent:
+         sudo apt-get update
+         sudo apt-get install -y ca-certificates curl jq qemu-guest-agent
+         sudo systemctl enable --now qemu-guest-agent
+         sudo install -m 0755 -d /etc/apt/keyrings
+         sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+         sudo chmod a+r /etc/apt/keyrings/docker.asc
+         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+         sudo apt-get update
+         sudo apt-get install -y containerd.io
+
+    vi)  Generate default containerd configuration:
+         sudo rm -rf /etc/containerd/config.toml
+         sudo mkdir -p /etc/containerd
+         containerd config default | sudo tee /etc/containerd/config.toml
+    vii) In the generated /etc/containerd/config.toml, update:
+         - SystemdCgroup = true:
+           sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+         - disabled_plugins = [] (ensures CRI plugin is active):
+           sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
+    viii) Reload systemd daemon and restart containerd:
+         sudo systemctl daemon-reload
+         sudo systemctl restart containerd
+
+    ix)  Install Kubernetes packages (kubelet, kubeadm, kubectl, cri-tools):
+         sudo apt-get update
+         sudo apt-get install -y apt-transport-https ca-certificates curl gpg
+         sudo install -m 0755 -d /etc/apt/keyrings
+         curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key" | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+         echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.37/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+         sudo apt-get update
+         sudo apt-get install -y kubelet kubeadm kubectl cri-tools
+         sudo apt-mark hold kubelet kubeadm kubectl cri-tools
+         sudo systemctl enable --now kubelet
+
+    x)   Pull images with kubeadm and determine the pause image version:
+         sudo kubeadm config images pull
+         (Check which version of pause image is specified)
+    xi)  Update the sandbox image in /etc/containerd/config.toml to match this version:
+         e.g. sandbox = 'registry.k8s.io/pause:3.10.2'
+    xii) Reload systemd daemon and restart containerd:
+         sudo systemctl daemon-reload
+         sudo systemctl restart containerd
+    xiii) Generalize netplan configuration on node1 so all cloned VMs match their interfaces:
+         sudo tee /etc/netplan/50-cloud-init.yaml <<EOF
+network:
+  version: 2
+  ethernets:
+    id0:
+      match:
+        name: "en*"
+      dhcp4: true
+      dhcp-identifier: mac
+EOF
+         sudo chmod 600 /etc/netplan/50-cloud-init.yaml
+         sudo netplan apply
+    xiv) Exit out of node1 back to host machine.
+
+12. Clone node2 and node3 from node1 (Golden Image):
+    i)   Gracefully shut down node1:
+         if [ "$(virsh domstate node1 2>/dev/null)" != "shut off" ]; then virsh shutdown node1 2>/dev/null || true; fi
+         while [ "$(virsh domstate node1)" != "shut off" ]; do sleep 1; done
+         sudo virsh change-media node1 sda --eject --config --force 2>/dev/null || true
+    ii)  Register static DHCP reservations for node2 and node3 at creation time:
+         sudo virsh net-update default add ip-dhcp-host "<host mac='52:54:00:10:00:14' name='node2' ip='10.67.38.20'/>" --live --config
+         sudo virsh net-update default add ip-dhcp-host "<host mac='52:54:00:10:00:1e' name='node3' ip='10.67.38.30'/>" --live --config
+         (Note: MAC last octets '14' and '1e' are the hex equivalents of IP 4th octets '20' and '30').
+    iii) Clone node2 and node3 disks and VM domains from node1:
+         virt-clone -o node1 -n node2 -m 52:54:00:10:00:14 -f /var/lib/libvirt/images/node2.qcow2
+         virt-clone -o node1 -n node3 -m 52:54:00:10:00:1e -f /var/lib/libvirt/images/node3.qcow2
+    iv)  Start all three virtual machines:
+         virsh start node1
+         virsh start node2
+         virsh start node3
+    v)   Personalize node2 (set hostname, regenerate unique machine-id, and reboot cleanly):
+         ssh "$USER@node2" "sudo hostnamectl set-hostname node2 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo reboot"
+    vi)  Personalize node3 (set hostname, regenerate unique machine-id, and reboot cleanly):
+         ssh "$USER@node3" "sudo hostnamectl set-hostname node3 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo reboot"
+    vii) Wait for all three nodes (node1, node2, node3) to boot/reboot and verify SSH connectivity and hostnames:
+         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node1" "hostname" 2>/dev/null; do sleep 1; done
+         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node2" "hostname" 2>/dev/null; do sleep 1; done
+         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node3" "hostname" 2>/dev/null; do sleep 1; done
+         ssh "$USER@node1" hostname
+         ssh "$USER@node2" hostname
+         ssh "$USER@node3" hostname
+
+13. For node1 (Bootstrap Control Plane):
+    i)    Copy parameterized kubeadm-init-config.yaml to node1.
+    ii)   Generate kube-vip static pod manifest on node1 in /tmp/kube-vip.yaml:
+          KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name" 2>/dev/null || echo "v1.3.0")
+          sudo ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION
+          sudo mkdir -p /etc/kubernetes/manifests
+          sudo ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip manifest pod \
+              --interface enp1s0 \
+              --address 10.67.38.250 \
+              --controlplane \
+              --services \
+              --arp \
+              --leaderElection | sudo tee /tmp/kube-vip.yaml
+          (Note: enp1s0 is the standard virtio network interface name in KVM virtual machines).
+    iii)  Temporarily update hostPath to super-admin.conf in /tmp/kube-vip.yaml before placing in manifests:
+          sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /tmp/kube-vip.yaml
+          sudo cp -f /tmp/kube-vip.yaml /etc/kubernetes/manifests/kube-vip.yaml
+    iv)   Initialize control plane with kubeadm:
+          sudo kubeadm init --config ./kubeadm-init-config.yaml --upload-certs
+    v)    Note the token, discovery-token-ca-cert-hash, and certificate-key from the command output, e.g.:
+          kubeadm join 10.67.38.250:6443 --token <TOKEN> \
+              --discovery-token-ca-cert-hash sha256:<HASH> \
+              --control-plane --certificate-key <CERT_KEY>
+    vi)   Copy /etc/kubernetes/admin.conf to $HOME/.kube/config (as instructed by the command output).
+    vii)  Verify API server is reachable and responds properly (e.g. kubectl get nodes).
+    viii) Safely revert hostPath back to admin.conf:
+          sudo sed -i '/hostPath:/{n;s/super-admin.conf/admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
+    ix)   Move /etc/kubernetes/manifests/kube-vip.yaml to /tmp/
+    x)    Verify kube-vip pod is terminated.
+    xi)   Move /tmp/kube-vip.yaml back to /etc/kubernetes/manifests/
+    xii)  Verify kube-vip pod is recreated and ready.
+    xiii) Exit out of node1 back to host machine.
+
+14. Copy Kubernetes admin config from node1 to host machine:
+    mkdir -p $HOME/.kube
+    scp "$USER@node1:/home/$USER/.kube/config" "$HOME/.kube/config"
+    (Note: Client tools including kubectl are installed on the host in Step 19, allowing direct cluster management from the host).
+
+15. Update join configuration files on host:
+    Update kubeadm-join-cp-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
+
+16. For remaining control plane nodes (node2 .. nodeN) - Join Control Plane:
+    For each remaining control plane node:
+      i)   SCP parameterized kubeadm-join-cp-config.yaml to the node.
+      ii)  Run:
+           sudo kubeadm join --config ./kubeadm-join-cp-config.yaml
+      iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+      iv)  Exit out of node back to host machine.
+
+17. Distribute kube-vip manifest:
+    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on all remaining control plane nodes (node2 .. nodeN).
+
+18. For worker nodes (Join Worker Nodes) (if NUM_WORKER > 0):
+    For each worker node:
+      i)   SCP parameterized kubeadm-join-worker-config.yaml to the worker node.
+      ii)  Run:
+           sudo kubeadm join --config ./kubeadm-join-worker-config.yaml
+      iii) Exit out of node back to host machine.
+
+19. Install host tools:
+    On the host machine, install:
+      - Cilium CLI (from official GitHub release)
+      - Helm (from Buildkite APT repository)
+      - Kubectl (from official Kubernetes APT repository)
+
+20. Remove control-plane taints from control plane nodes:
+    Run on host for each control plane node:
+      kubectl taint nodes <node> node-role.kubernetes.io/control-plane-
+    (Allows scheduling user and system workloads across control plane nodes)
+
+21. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
+    helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
+
+22. Render Cilium deployment manifest:
+    helm template cilium ./cilium-${CILIUM_VERSION}.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
+
+23. Apply Cilium CNI to the cluster:
+    kubectl apply -f ./cilium.yaml
+
+24. Wait for Cilium deployment readiness:
+    Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
+
+25. Verify all nodes reach 'Ready' status:
+    Check that all 3 nodes (node1, node2, node3) report condition Ready:
+      kubectl get nodes -o wide
+
+26. Deploy test workload:
+    kubectl apply -f dnsutils.yaml
+    Verify cluster networking and DNS resolution.

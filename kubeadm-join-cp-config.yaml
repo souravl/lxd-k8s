@@ -15,3 +15,10 @@ controlPlane:
     advertiseAddress: ${NODE_IP}
     bindPort: 6443
   certificateKey: "${CERT_KEY}"
+timeouts:
+  controlPlaneComponentHealthCheck: 5m0s
+  kubeletHealthCheck: 4m0s
+  kubernetesAPICall: 5m0s
+  etcdAPICall: 3m0s
+  tlsBootstrap: 5m0s
+  discovery: 5m0s

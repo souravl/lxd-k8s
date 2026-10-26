@@ -23,9 +23,10 @@ NODE3_IP="10.67.38.30"
 NODE4_IP="10.67.38.40"
 NODE5_IP="10.67.38.50"
 
-# Container Resource Limits
-LIMITS_CPU="4"
-LIMITS_MEMORY="4GB"
+# Node Resource Limits
+LIMITS_CPU="2"
+LIMITS_MEMORY="3GB"
+LIMITS_DISK="15GB"
 
 # Container OS & Software Versions
 UBUNTU_VERSION="24.04"
