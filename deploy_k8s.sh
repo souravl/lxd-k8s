@@ -40,7 +40,7 @@ usage() {
     cat <<EOF
 Usage: $0 [OPTIONS]
 
-Automates the deployment of a 3-node HA Kubernetes cluster on Incus or LXD containers.
+Automates the deployment of a High-Availability Kubernetes cluster on Incus or LXD containers.
 
 Options:
   -c <engine>    Container engine to use: 'incus' (default) or 'lxd'
@@ -77,7 +77,7 @@ export UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 export KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.37}"
 export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
 
-VIP="${VIP:-10.67.38.40}"
+VIP="${VIP:-10.67.38.250}"
 BRIDGE_IPV4="${BRIDGE_IPV4:-10.67.38.1}"
 BRIDGE_IPV6="${BRIDGE_IPV6:-fd42:51e5:ef75:abeb::1}"
 # Verify NUM_CP and NUM_WORKER
@@ -170,7 +170,7 @@ fi
 SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)
 
-# Static IP to node mappings (passed to setup_ssh_nodes.sh)
+# Static IP to node mappings
 HOSTS_ENTRIES=()
 for ((i=1; i<=TOTAL_NODES; i++)); do
     var="NODE${i}_IP"
@@ -225,6 +225,7 @@ if [ -f "$HOME/.ssh/known_hosts" ]; then
 fi
 
 info "Selected container engine: ${ENGINE_NAME} (CLI: ${CONTAINER_CMD})"
+info "Nodes configuration: ${NUM_CP} control plane node(s), ${NUM_WORKER} worker node(s)"
 
 # ------------------------------------------------------------------------------
 # Step 1: Install container engine on host
@@ -1004,7 +1005,7 @@ done
 success "Cilium CNI is fully operational."
 
 # ------------------------------------------------------------------------------
-# Step 25: Check all 3 nodes are in Ready status
+# Step 25: Check all nodes are in Ready status
 # ------------------------------------------------------------------------------
 step_header "25" "Verify all cluster nodes are Ready"
 info "Waiting for all nodes to report condition Ready..."
