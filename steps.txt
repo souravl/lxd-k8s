@@ -1,15 +1,29 @@
 # ==============================================================================
 # High-Availability Kubernetes Cluster on Incus or LXD - Step-by-Step Guide
 # Note: Add 'sudo' where needed. The user is expected to provide sudo password.
-# Static IP addresses (VIP, BRIDGE_IPV4, BRIDGE_IPV6, NODE1_IP, NODE2_IP, NODE3_IP), Ubuntu release
-# (UBUNTU_VERSION), and software versions (KUBERNETES_VERSION, CILIUM_VERSION)
-# are configured in 'inventory.txt'.
+# The steps below illustrate a 3-node cluster example (node1, node2, node3),
+# but the actual number of control plane and worker nodes (NUM_CP, NUM_WORKER),
+# static IP addresses (VIP, BRIDGE_IPV4, BRIDGE_IPV6, NODE1_IP, NODE2_IP, ...),
+# hardware sizing (LIMITS_CPU, LIMITS_MEMORY), Ubuntu release (UBUNTU_VERSION),
+# and software versions (KUBERNETES_VERSION, CILIUM_VERSION) are configured in 'inventory.txt'.
 # ==============================================================================
 
 1. Install Container Engine:
    - For Incus (Recommended default):
+     # If on standard Ubuntu 24.04 without Incus in default repositories, add Zabbly repo:
+     sudo mkdir -p /etc/apt/keyrings
+     sudo curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc
+     sudo sh -c 'cat <<EOF > /etc/apt/sources.list.d/zabbly-incus-stable.sources
+Enabled: yes
+Types: deb
+URIs: https://pkgs.zabbly.com/incus/stable
+Suites: $(. /etc/os-release && echo ${VERSION_CODENAME})
+Components: main
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/zabbly.asc
+EOF'
+     sudo apt-get update -qq
      sudo apt-get install -y incus
-     (Ensure Zabbly repository is added if on standard Ubuntu 24.04)
    - For LXD:
      sudo snap install lxd
 
@@ -59,11 +73,13 @@ EOF
      sudo iptables -I DOCKER-USER -i incusbr0 -j ACCEPT
      sudo iptables -I DOCKER-USER -o incusbr0 -j ACCEPT
      sudo iptables -t nat -A POSTROUTING -s 10.67.38.0/24 ! -d 10.67.38.0/24 -j MASQUERADE
+     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent
      sudo netfilter-persistent save
    - For LXD:
      sudo iptables -I DOCKER-USER -i lxdbr0 -j ACCEPT
      sudo iptables -I DOCKER-USER -o lxdbr0 -j ACCEPT
      sudo iptables -t nat -A POSTROUTING -s 10.67.38.0/24 ! -d 10.67.38.0/24 -j MASQUERADE
+     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent
      sudo netfilter-persistent save
 
 8. Create and configure container profile 'k8s':
@@ -76,10 +92,10 @@ EOF
 
 9. Launch and start container (node1):
    - For Incus:
-     incus launch images:ubuntu/24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
+     incus launch images:ubuntu/24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.10
      incus start node1
    - For LXD:
-     lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.87
+     lxc launch ubuntu:24.04 node1 --profile k8s -d eth0,ipv4.address=10.67.38.10
      lxc start node1
 
 10. Configure SSH user, sudoers, and /etc/hosts for node1:
@@ -97,6 +113,7 @@ EOF
       incus exec node1 -- apt-get update -qq
       incus exec node1 -- apt-get install -y -qq openssh-server
       incus exec node1 -- systemctl enable --now ssh
+      incus exec node1 -- bash -c "echo -e '10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5' >> /etc/hosts"
     - For LXD:
       lxc exec node1 -- useradd -m -s /bin/bash "$USER"
       lxc exec node1 -- usermod -aG sudo "$USER"
@@ -111,8 +128,9 @@ EOF
       lxc exec node1 -- apt-get update -qq
       lxc exec node1 -- apt-get install -y -qq openssh-server
       lxc exec node1 -- systemctl enable --now ssh
-    - Map node IPs in /etc/hosts on both the host and inside node1:
-      echo -e "10.67.38.87\tnode1\n10.67.38.221\tnode2\n10.67.38.211\tnode3" | sudo tee -a /etc/hosts
+      lxc exec node1 -- bash -c "echo -e '10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5' >> /etc/hosts"
+    - Map node IPs in /etc/hosts on the host machine:
+      echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5" | sudo tee -a /etc/hosts
 
 11. On node1:
     i)   Install containerd:
@@ -130,8 +148,10 @@ EOF
          sudo mkdir -p /etc/containerd
          containerd config default | sudo tee /etc/containerd/config.toml
     iii) In the generated /etc/containerd/config.toml, update:
-         - SystemdCgroup = true
-         - disabled_plugins = []
+         - SystemdCgroup = true:
+           sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+         - disabled_plugins = [] (ensures CRI plugin is active):
+           sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
     iv)  Reload systemd daemon and restart containerd:
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
@@ -151,48 +171,60 @@ EOF
          sudo kubeadm config images pull
          (Check which version of pause image is specified)
     vii) Update the sandbox image in /etc/containerd/config.toml to match this version:
-         e.g. sandbox = 'registry.k8s.io/pause:3.10.2'
+         sudo sed -i 's|sandbox_image = .*|sandbox_image = "registry.k8s.io/pause:3.10.2"|g' /etc/containerd/config.toml
+         sudo sed -i 's|sandbox = .*|sandbox = "registry.k8s.io/pause:3.10.2"|g' /etc/containerd/config.toml
     viii) Reload systemd daemon and restart containerd:
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
 
-12. Clone node2 and node3 from node1:
+12. Clone remaining nodes (node2 .. nodeN) from node1:
     - For Incus:
       i)   Stop node1:
            incus stop node1
-      ii)  Copy node2 and node3, assign static IP addresses:
+      ii)  Copy remaining nodes and assign static IP addresses:
            incus copy node1 node2
-           incus config device set node2 eth0 ipv4.address 10.67.38.221
+           incus config device set node2 eth0 ipv4.address 10.67.38.20
            incus copy node1 node3
-           incus config device set node3 eth0 ipv4.address 10.67.38.211
-      iii) Start all three containers:
+           incus config device set node3 eth0 ipv4.address 10.67.38.30
+           # (Repeat for any additional control plane or worker nodes, e.g. node4 -> 10.67.38.40, node5 -> 10.67.38.50)
+      iii) Start all containers:
            incus start node1 node2 node3
-      iv)  Set hostnames and regenerate unique machine-ids:
+      iv)  Set hostnames, regenerate unique machine-ids, and regenerate SSH host keys:
            incus exec node2 -- bash -c "echo node2 > /etc/hostname && hostname node2"
            incus exec node2 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+           incus exec node2 -- bash -c "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A && systemctl restart ssh"
            incus exec node3 -- bash -c "echo node3 > /etc/hostname && hostname node3"
            incus exec node3 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
-      v)   Verify SSH connectivity to all nodes.
+           incus exec node3 -- bash -c "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A && systemctl restart ssh"
+      v)   Verify SSH connectivity to all nodes and populate host's known_hosts:
+           ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
     - For LXD:
       i)   Stop node1:
            lxc stop node1
-      ii)  Copy node2 and node3, assign static IP addresses:
+      ii)  Copy remaining nodes and assign static IP addresses:
            lxc copy node1 node2
-           lxc config device set node2 eth0 ipv4.address 10.67.38.221
+           lxc config device set node2 eth0 ipv4.address 10.67.38.20
            lxc copy node1 node3
-           lxc config device set node3 eth0 ipv4.address 10.67.38.211
-      iii) Start all three containers:
+           lxc config device set node3 eth0 ipv4.address 10.67.38.30
+           # (Repeat for any additional control plane or worker nodes, e.g. node4 -> 10.67.38.40, node5 -> 10.67.38.50)
+      iii) Start all containers:
            lxc start node1 node2 node3
-      iv)  Set hostnames and regenerate unique machine-ids:
+      iv)  Set hostnames, regenerate unique machine-ids, and regenerate SSH host keys:
            lxc exec node2 -- bash -c "echo node2 > /etc/hostname && hostname node2"
            lxc exec node2 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
+           lxc exec node2 -- bash -c "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A && systemctl restart ssh"
            lxc exec node3 -- bash -c "echo node3 > /etc/hostname && hostname node3"
            lxc exec node3 -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup"
-      v)   Verify SSH connectivity to all nodes.
+           lxc exec node3 -- bash -c "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A && systemctl restart ssh"
+      v)   Verify SSH connectivity to all nodes and populate host's known_hosts:
+           ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
 13. For node1 (Bootstrap Control Plane):
-    i)    Copy parameterized kubeadm-init-config.yaml to node1.
+    i)    Copy parameterized kubeadm-init-config.yaml to node1:
+          Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), and ${CERT_SANS}
+          (a YAML list including 127.0.0.1, localhost, 10.67.38.250, and each control plane's IP and hostname).
+          scp kubeadm-init-config.yaml node1:~/kubeadm-init-config.yaml
     ii)   Generate kube-vip static pod manifest on node1 in /tmp/kube-vip.yaml:
           KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name" 2>/dev/null || echo "v1.3.0")
           sudo ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION
@@ -218,43 +250,68 @@ EOF
     viii) Safely revert hostPath back to admin.conf:
           sudo sed -i '/hostPath:/{n;s/super-admin.conf/admin.conf/;}' /etc/kubernetes/manifests/kube-vip.yaml
     ix)   Move /etc/kubernetes/manifests/kube-vip.yaml to /tmp/
-    x)    Verify kube-vip pod is terminated.
+    x)    Stop and remove old kube-vip container to force static pod reload:
+          sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock stopp $(sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock pods --name kube-vip -q 2>/dev/null) 2>/dev/null || true
+          sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock rmp $(sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock pods --name kube-vip -q 2>/dev/null) 2>/dev/null || true
     xi)   Move /tmp/kube-vip.yaml back to /etc/kubernetes/manifests/
-    xii)  Verify kube-vip pod is recreated and ready.
+    xii)  Verify kube-vip pod is recreated and ready:
+          until sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock pods --name kube-vip --state Ready -q 2>/dev/null | grep -q .; do sleep 2; done
+          until kubectl get nodes >/dev/null 2>&1; do sleep 2; done
     xiii) Exit out of node1 back to host machine.
 
 14. Copy Kubernetes admin config from node1 to host machine:
-    Copy /home/$USER/.kube/config from node1 to $HOME/.kube/config on the host machine so kubectl can be used from the host.
+    mkdir -p $HOME/.kube
+    scp "$USER@node1:/home/$USER/.kube/config" "$HOME/.kube/config"
+    chmod 600 "$HOME/.kube/config"
+    (Allows managing the cluster with kubectl directly from the host machine).
 
 15. Update join configuration files on host:
-    Update kubeadm-join-cp-config.yaml with the values noted in step 13.v (token, caCertHashes, certificateKey).
+    - Update kubeadm-join-cp-config.yaml with the values noted in step 13.v (${JOIN_TOKEN}, ${CA_CERT_HASH}, ${CERT_KEY}, ${VIP}, and target ${NODE_IP}).
+    - Update kubeadm-join-worker-config.yaml with ${JOIN_TOKEN}, ${CA_CERT_HASH}, ${VIP}, and target ${NODE_IP}.
 
-16. For remaining control plane nodes (node2 .. nodeN) - Join Control Plane:
+16. For remaining control plane nodes (node2 .. node${NUM_CP}) - Join Control Plane:
     For each remaining control plane node:
       i)   SCP parameterized kubeadm-join-cp-config.yaml to the node.
       ii)  Run:
            sudo kubeadm join --config ./kubeadm-join-cp-config.yaml --ignore-preflight-errors=SystemVerification
-      iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config.
+      iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config and set ownership:
+           mkdir -p $HOME/.kube
+           sudo cp -f /etc/kubernetes/admin.conf $HOME/.kube/config
+           sudo chown $(id -u):$(id -g) $HOME/.kube/config
       iv)  Exit out of node back to host machine.
 
 17. Distribute kube-vip manifest:
-    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on all remaining control plane nodes (node2 .. nodeN).
+    Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on all remaining control plane nodes (node2 .. node${NUM_CP}).
+    (Note: Do NOT distribute kube-vip to worker nodes).
 
-18. For worker nodes (Join Worker Nodes):
-    For each worker node:
+18. For worker nodes (Join Worker Nodes) (if NUM_WORKER > 0):
+    For each worker node (node${NUM_CP+1} .. node${TOTAL_NODES}):
       i)   SCP parameterized kubeadm-join-worker-config.yaml to the worker node.
       ii)  Run:
            sudo kubeadm join --config ./kubeadm-join-worker-config.yaml --ignore-preflight-errors=SystemVerification
       iii) Exit out of node back to host machine.
 
 19. Install host tools:
-    On the host machine, install:
-      - Cilium CLI (from official GitHub release)
-      - Helm (from Buildkite APT repository)
-      - Kubectl (from official Kubernetes APT repository)
+    On the host machine, install Cilium CLI, Helm, and Kubectl:
+    i)   Install Cilium CLI:
+         CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+         CLI_ARCH=amd64; if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
+         curl -L --fail --progress-bar "https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-${CLI_ARCH}.tar.gz" -o /tmp/cilium-linux-${CLI_ARCH}.tar.gz
+         sudo tar xzvfC /tmp/cilium-linux-${CLI_ARCH}.tar.gz /usr/local/bin
+         rm -f /tmp/cilium-linux-${CLI_ARCH}.tar.gz
+    ii)  Install Helm via APT:
+         sudo apt-get update -qq && sudo apt-get install -y -qq curl gpg apt-transport-https
+         curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null
+         echo "deb [signed-by=/usr/share/keyrings/helm.gpg] https://packages.buildkite.com/helm-linux/helm-debian/any/ any main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+         sudo apt-get update -qq && sudo apt-get install -y helm
+    iii) Install Kubectl via APT:
+         curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.37/deb/Release.key" | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+         echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.37/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+         sudo apt-get update -qq && sudo apt-get install -y kubectl
+         sudo apt-mark hold kubectl
 
 20. Remove control-plane taints from control plane nodes:
-    Run on host for each control plane node:
+    Run on host for each control plane node (node1 .. node${NUM_CP}):
       kubectl taint nodes <node> node-role.kubernetes.io/control-plane-
     (Allows scheduling user and system workloads across control plane nodes)
 
@@ -271,9 +328,12 @@ EOF
     Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
 
 25. Verify all nodes reach 'Ready' status:
-    Check that all 3 nodes (node1, node2, node3) report condition Ready:
+    Wait for all cluster nodes to report condition Ready:
+      kubectl wait --for=condition=Ready nodes --all --timeout=300s
       kubectl get nodes -o wide
 
 26. Deploy test workload:
     kubectl apply -f dnsutils.yaml
+    kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
+    kubectl get pods -A
     Verify cluster networking and DNS resolution.
