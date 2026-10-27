@@ -675,22 +675,28 @@ if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
             sleep 1
         done
 
-        info "Personalizing hostname and machine-id on $TARGET_NODE..."
+        info "Personalizing hostname, machine-id, and regenerating SSH host keys on $TARGET_NODE..."
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${IP}" "
             sudo hostnamectl set-hostname ${TARGET_NODE}
             sudo rm -f /etc/machine-id /var/lib/dbus/machine-id
             sudo systemd-machine-id-setup
+            sudo rm -f /etc/ssh/ssh_host_*
+            sudo ssh-keygen -A
             sudo reboot
         " || true
     done
 
-    # v) Wait for all nodes to reboot and verify SSH connectivity and hostnames
+    # v) Wait for all nodes to reboot, verify SSH connectivity and hostnames, and populate known_hosts
     info "Verifying all nodes (${NODES[*]}) are running and reachable via SSH..."
     for NODE in "${NODES[@]}"; do
         until ssh "${SSH_OPTS[@]}" -o ConnectTimeout=2 "${SSH_USER}@${NODE}" "hostname" 2>/dev/null | grep -q "$NODE"; do
             sleep 1
         done
         success "Node $NODE is running, personalized, and reachable via SSH."
+        ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$NODE" >/dev/null 2>&1 || true
+        ssh-keygen -f "$HOME/.ssh/known_hosts" -R "${NODE_IPS[$NODE]}" >/dev/null 2>&1 || true
+        ssh-keyscan -H "$NODE" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+        ssh-keyscan -H "${NODE_IPS[$NODE]}" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
     done
 else
     step_header "12" "Single-node deployment (skipping cloning)"

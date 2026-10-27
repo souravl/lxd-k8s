@@ -646,24 +646,29 @@ if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
         done
     done
 
-    # v) Set hostnames, regenerate machine-ids, and verify SSH
+    # v) Set hostnames, regenerate machine-ids, and regenerate SSH host keys
     for TARGET_NODE in "${CLONE_NODES[@]}"; do
-        info "Setting hostname and regenerating machine-id on $TARGET_NODE..."
+        info "Setting hostname, regenerating machine-id and SSH host keys on $TARGET_NODE..."
         $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "echo '$TARGET_NODE' > /etc/hostname && hostname '$TARGET_NODE'"
         $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "rm -f /etc/machine-id /var/lib/dbus/machine-id && systemd-machine-id-setup" >/dev/null 2>&1
+        $CONTAINER_CMD exec "$TARGET_NODE" -- bash -c "rm -f /etc/ssh/ssh_host_* && ssh-keygen -A && systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null" >/dev/null 2>&1
     done
 else
     step_header "12" "Single-node deployment (skipping cloning)"
     info "Only node1 is defined; skipping clone step."
 fi
 
-# Verify SSH connectivity to all nodes
+# Verify SSH connectivity to all nodes and populate known_hosts
 for NODE in "${NODES[@]}"; do
     info "Verifying SSH connectivity to $NODE..."
     until ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "true" 2>/dev/null; do
         sleep 2
     done
     success "SSH to $NODE is operational."
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$NODE" >/dev/null 2>&1 || true
+    ssh-keygen -f "$HOME/.ssh/known_hosts" -R "${NODE_IPS[$NODE]}" >/dev/null 2>&1 || true
+    ssh-keyscan -H "$NODE" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+    ssh-keyscan -H "${NODE_IPS[$NODE]}" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
 done
 success "All nodes (${NODES[*]}) are cloned, started, and reachable via SSH."
 

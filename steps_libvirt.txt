@@ -214,17 +214,15 @@ EOF
          virsh start node1
          virsh start node2
          virsh start node3
-    v)   Personalize node2 (set hostname, regenerate unique machine-id, and reboot cleanly):
-         ssh "$USER@node2" "sudo hostnamectl set-hostname node2 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo reboot"
-    vi)  Personalize node3 (set hostname, regenerate unique machine-id, and reboot cleanly):
-         ssh "$USER@node3" "sudo hostnamectl set-hostname node3 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo reboot"
-    vii) Wait for all three nodes (node1, node2, node3) to boot/reboot and verify SSH connectivity and hostnames:
+    v)   Personalize node2 (set hostname, regenerate unique machine-id and SSH host keys, and reboot cleanly):
+         ssh "$USER@node2" "sudo hostnamectl set-hostname node2 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo rm -f /etc/ssh/ssh_host_* && sudo ssh-keygen -A && sudo reboot"
+    vi)  Personalize node3 (set hostname, regenerate unique machine-id and SSH host keys, and reboot cleanly):
+         ssh "$USER@node3" "sudo hostnamectl set-hostname node3 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo rm -f /etc/ssh/ssh_host_* && sudo ssh-keygen -A && sudo reboot"
+    vii) Wait for all three nodes (node1, node2, node3) to boot/reboot, verify SSH connectivity and hostnames, and populate known_hosts:
          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node1" "hostname" 2>/dev/null; do sleep 1; done
          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node2" "hostname" 2>/dev/null; do sleep 1; done
          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node3" "hostname" 2>/dev/null; do sleep 1; done
-         ssh "$USER@node1" hostname
-         ssh "$USER@node2" hostname
-         ssh "$USER@node3" hostname
+         ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
 13. For node1 (Bootstrap Control Plane):
     i)    Copy parameterized kubeadm-init-config.yaml to node1.
