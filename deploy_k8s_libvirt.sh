@@ -160,6 +160,9 @@ DISK_SIZE=$(echo "$LIMITS_DISK" | sed 's/[bB]$//')
 
 SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)
+# Options for polling ssh calls (until-loops): ConnectTimeout only limits the connect; the ServerAlive options make a
+# connection that hangs after connecting (e.g. the VM reboots mid-session) fail after ~6 seconds, so the loop retries.
+SSH_POLL_OPTS=(-o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3)
 
 # Static IP to node mappings
 HOSTS_ENTRIES=()
@@ -171,6 +174,7 @@ done
 NODES=()
 declare -A NODE_IPS
 declare -A NODE_MACS
+declare -A BOOT_IDS   # boot ID of each clone before its reboot (used to detect the reboot)
 for ((i=1; i<=TOTAL_NODES; i++)); do
     ENTRY="${HOSTS_ENTRIES[$((i-1))]}"
     IP=$(echo "$ENTRY" | awk '{print $1}')
@@ -434,6 +438,14 @@ if [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
     SSH_PUB_KEY="$HOME/.ssh/id_ed25519.pub"
 elif [ -f "$HOME/.ssh/id_rsa.pub" ]; then
     SSH_PUB_KEY="$HOME/.ssh/id_rsa.pub"
+elif [ -f "$HOME/.ssh/id_ed25519" ] || [ -f "$HOME/.ssh/id_rsa" ]; then
+    # A private key without its public key: ssh-keygen would ask to overwrite the private key, so stop instead.
+    _PRIV_KEY="$HOME/.ssh/id_ed25519"
+    [ -f "$_PRIV_KEY" ] || _PRIV_KEY="$HOME/.ssh/id_rsa"
+    error "Private key ${_PRIV_KEY} exists but its public key ${_PRIV_KEY}.pub is missing."
+    error "Generate public key from private key, then re-run this script:"
+    error "    ssh-keygen -y -f ${_PRIV_KEY} > ${_PRIV_KEY}.pub"
+    exit 1
 else
     info "No SSH public key found in ~/.ssh/ (id_ed25519.pub or id_rsa.pub)."
     info "Generating new SSH key ('ssh-keygen -t ed25519')..."
@@ -489,7 +501,7 @@ if [ "$STATE" != "running" ]; then
 fi
 
 info "Waiting for node1 to complete first boot and become reachable over SSH (${NODE1_IP})..."
-until ssh "${SSH_OPTS[@]}" -o ConnectTimeout=2 "${SSH_USER}@${NODE1_IP}" "true" 2>/dev/null; do
+until ssh "${SSH_OPTS[@]}" "${SSH_POLL_OPTS[@]}" "${SSH_USER}@${NODE1_IP}" "true" 2>/dev/null; do
     sleep 2
 done
 success "node1 is running and accessible via SSH."
@@ -671,9 +683,12 @@ if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
     for TARGET_NODE in "${CLONE_NODES[@]}"; do
         IP="${NODE_IPS[$TARGET_NODE]}"
         info "Waiting for $TARGET_NODE ($IP) SSH to respond..."
-        until ssh "${SSH_OPTS[@]}" -o ConnectTimeout=2 "${SSH_USER}@${IP}" "true" 2>/dev/null; do
+        until ssh "${SSH_OPTS[@]}" "${SSH_POLL_OPTS[@]}" "${SSH_USER}@${IP}" "true" 2>/dev/null; do
             sleep 1
         done
+
+        # Remember the boot ID, so that step v can tell the reboot below really happened
+        BOOT_IDS["$TARGET_NODE"]=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${IP}" "cat /proc/sys/kernel/random/boot_id")
 
         info "Personalizing hostname, machine-id, and regenerating SSH host keys on $TARGET_NODE..."
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${IP}" "
@@ -689,7 +704,21 @@ if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
     # v) Wait for all nodes to reboot, verify SSH connectivity and hostnames, and populate known_hosts
     info "Verifying all nodes (${NODES[*]}) are running and reachable via SSH..."
     for NODE in "${NODES[@]}"; do
-        until ssh "${SSH_OPTS[@]}" -o ConnectTimeout=2 "${SSH_USER}@${NODE}" "hostname" 2>/dev/null | grep -q "$NODE"; do
+        # Clones: first wait until the node runs a new boot (boot ID differs from the one recorded before the
+        # reboot), so that an SSH answer from the still-running old boot is not taken as "rebooted".
+        if [ -n "${BOOT_IDS[$NODE]:-}" ]; then
+            info "Waiting for $NODE to reboot (boot ID change)..."
+            BOOT_DEADLINE=$((SECONDS + 600))
+            until NEW_BOOT_ID=$(ssh "${SSH_OPTS[@]}" "${SSH_POLL_OPTS[@]}" "${SSH_USER}@${NODE}" "cat /proc/sys/kernel/random/boot_id" 2>/dev/null) \
+                  && [ -n "$NEW_BOOT_ID" ] && [ "$NEW_BOOT_ID" != "${BOOT_IDS[$NODE]}" ]; do
+                if [ "$SECONDS" -ge "$BOOT_DEADLINE" ]; then
+                    error "$NODE did not come back with a new boot ID within 600 seconds."
+                    exit 1
+                fi
+                sleep 1
+            done
+        fi
+        until ssh "${SSH_OPTS[@]}" "${SSH_POLL_OPTS[@]}" "${SSH_USER}@${NODE}" "hostname" 2>/dev/null | grep -q "$NODE"; do
             sleep 1
         done
         success "Node $NODE is running, personalized, and reachable via SSH."

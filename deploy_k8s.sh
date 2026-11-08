@@ -169,6 +169,9 @@ fi
 
 SSH_USER="${USER}"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes)
+# Options for polling ssh calls (until-loops): ConnectTimeout only limits the connect; the ServerAlive options make a
+# connection that hangs after connecting (e.g. the VM reboots mid-session) fail after ~6 seconds, so the loop retries.
+SSH_POLL_OPTS=(-o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3)
 
 # Static IP to node mappings
 HOSTS_ENTRIES=()
@@ -421,6 +424,14 @@ if [ -f "$HOME/.ssh/id_ed25519.pub" ]; then
     SSH_PUB_KEY="$HOME/.ssh/id_ed25519.pub"
 elif [ -f "$HOME/.ssh/id_rsa.pub" ]; then
     SSH_PUB_KEY="$HOME/.ssh/id_rsa.pub"
+elif [ -f "$HOME/.ssh/id_ed25519" ] || [ -f "$HOME/.ssh/id_rsa" ]; then
+    # A private key without its public key: ssh-keygen would ask to overwrite the private key, so stop instead.
+    _PRIV_KEY="$HOME/.ssh/id_ed25519"
+    [ -f "$_PRIV_KEY" ] || _PRIV_KEY="$HOME/.ssh/id_rsa"
+    error "Private key ${_PRIV_KEY} exists but its public key ${_PRIV_KEY}.pub is missing."
+    error "Generate public key from private key, then re-run this script:"
+    error "    ssh-keygen -y -f ${_PRIV_KEY} > ${_PRIV_KEY}.pub"
+    exit 1
 else
     info "No SSH public key found in ~/.ssh/ (id_ed25519.pub or id_rsa.pub)."
     info "Generating new SSH key ('ssh-keygen -t ed25519')..."
@@ -432,7 +443,7 @@ fi
 info "Using SSH public key: $SSH_PUB_KEY"
 
 # ii) Check if passwordless SSH is already operational on node1
-if ssh "${SSH_OPTS[@]}" -o ConnectTimeout=2 "${SSH_USER}@node1" "true" 2>/dev/null; then
+if ssh "${SSH_OPTS[@]}" "${SSH_POLL_OPTS[@]}" "${SSH_USER}@node1" "true" 2>/dev/null; then
     info "Passwordless SSH access is already operational on node1. Skipping container user setup."
 else
     # Obtain password for SSH_USER inside containers
