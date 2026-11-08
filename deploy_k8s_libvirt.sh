@@ -977,9 +977,51 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 19: Install cilium CLI, helm, and kubectl on host
+# Step 19: Install the certificate check and renewal scripts on the control plane nodes
 # ------------------------------------------------------------------------------
-step_header "19" "Install cilium CLI, Helm, Kubectl, and yq on host"
+# certs/check_k8s_certs.sh and certs/renew_k8s_control_plane_certs.sh go to /usr/local/bin, the systemd service and timer
+# (check every 12 hours, renew when a control plane certificate expires within 60 days) to /etc/systemd/system.
+# Only the control plane nodes get them; workers have no control plane certificates.
+# DEPLOY_USER in renew_k8s_control_plane_certs.sh is set to ${SSH_USER}: the script also replaces that user's ~/.kube/config.
+# certs/renew_k8s_kubelet_client_cert.sh (kubelet client certificate of a node) is not installed: it is run by hand on the host.
+# Its FIRST_NODE is set here to node1 (in the repo copy of the script, so this changes the file on every run).
+step_header "19" "Install certificate check and renewal scripts on control plane nodes (${CP_NODES[*]})"
+CERTS_DIR="${SCRIPT_DIR}/certs"
+CERTS_FILES=(check_k8s_certs.sh renew_k8s_control_plane_certs.sh check_k8s_certs.service check_k8s_certs.timer)
+KUBELET_RENEW_SCRIPT="renew_k8s_kubelet_client_cert.sh"
+for F in "${CERTS_FILES[@]}" "$KUBELET_RENEW_SCRIPT"; do
+    if [ ! -f "${CERTS_DIR}/${F}" ]; then
+        error "${CERTS_DIR}/${F} not found!"
+        exit 1
+    fi
+done
+
+info "Setting FIRST_NODE to node1 in ${CERTS_DIR}/${KUBELET_RENEW_SCRIPT}..."
+sed -i "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" "${CERTS_DIR}/${KUBELET_RENEW_SCRIPT}"
+
+for NODE in "${CP_NODES[@]}"; do
+    info "Installing the certificate check and renewal scripts on $NODE..."
+    for F in "${CERTS_FILES[@]}"; do
+        scp "${SSH_OPTS[@]}" "${CERTS_DIR}/${F}" "${SSH_USER}@${NODE}:/tmp/${F}"
+    done
+    ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
+        sudo install -m 0755 /tmp/check_k8s_certs.sh /usr/local/bin/check_k8s_certs.sh
+        sudo install -m 0755 /tmp/renew_k8s_control_plane_certs.sh /usr/local/bin/renew_k8s_control_plane_certs.sh
+        sudo sed -i 's|^DEPLOY_USER=.*|DEPLOY_USER=\"${SSH_USER}\"|' /usr/local/bin/renew_k8s_control_plane_certs.sh
+        sudo install -m 0644 /tmp/check_k8s_certs.service /etc/systemd/system/check_k8s_certs.service
+        sudo install -m 0644 /tmp/check_k8s_certs.timer /etc/systemd/system/check_k8s_certs.timer
+        rm -f /tmp/check_k8s_certs.sh /tmp/renew_k8s_control_plane_certs.sh /tmp/check_k8s_certs.service /tmp/check_k8s_certs.timer
+        sudo systemctl daemon-reload
+        sudo systemctl enable --now check_k8s_certs.timer
+    "
+    success "Certificate check and renewal scripts installed on $NODE."
+done
+success "Certificate check timer enabled on all control plane nodes (${CP_NODES[*]})."
+
+# ------------------------------------------------------------------------------
+# Step 20: Install cilium CLI, helm, and kubectl on host
+# ------------------------------------------------------------------------------
+step_header "20" "Install cilium CLI, Helm, Kubectl, and yq on host"
 
 # i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
@@ -1080,9 +1122,9 @@ fi
 success "Host tooling ready."
 
 # ------------------------------------------------------------------------------
-# Step 20: Remove control-plane taints from control plane nodes
+# Step 21: Remove control-plane taints from control plane nodes
 # ------------------------------------------------------------------------------
-step_header "20" "Remove control-plane taints from control plane nodes"
+step_header "21" "Remove control-plane taints from control plane nodes"
 info "Removing control-plane taints from control plane nodes (${CP_NODES[*]})..."
 for NODE in "${CP_NODES[@]}"; do
     info "Untainting control plane node $NODE..."
@@ -1091,9 +1133,9 @@ done
 success "Control-plane taints removed from ${CP_NODES[*]}."
 
 # ------------------------------------------------------------------------------
-# Step 21: Download Cilium Helm chart
+# Step 22: Download Cilium Helm chart
 # ------------------------------------------------------------------------------
-step_header "21" "Download Cilium ${CILIUM_VERSION} Helm chart"
+step_header "22" "Download Cilium ${CILIUM_VERSION} Helm chart"
 if [ -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
     info "Cilium Helm chart already exists. Skipping download."
 else
@@ -1103,9 +1145,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 22: Template Cilium Helm chart into cilium.yaml
+# Step 23: Template Cilium Helm chart into cilium.yaml
 # ------------------------------------------------------------------------------
-step_header "22" "Template Cilium Helm chart"
+step_header "23" "Template Cilium Helm chart"
 info "Rendering cilium.yaml from values..."
 helm template cilium "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" \
     --namespace kube-system \
@@ -1113,17 +1155,17 @@ helm template cilium "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" \
 success "cilium.yaml templated successfully."
 
 # ------------------------------------------------------------------------------
-# Step 23: Apply Cilium manifest
+# Step 24: Apply Cilium manifest
 # ------------------------------------------------------------------------------
-step_header "23" "Apply Cilium CNI"
+step_header "24" "Apply Cilium CNI"
 info "Applying cilium.yaml..."
 kubectl apply -f "${SCRIPT_DIR}/cilium.yaml"
 success "Cilium manifest applied."
 
 # ------------------------------------------------------------------------------
-# Step 24: Wait for Cilium deployment readiness
+# Step 25: Wait for Cilium deployment readiness
 # ------------------------------------------------------------------------------
-step_header "24" "Wait for Cilium readiness"
+step_header "25" "Wait for Cilium readiness"
 info "Waiting for Cilium daemonsets and deployments to become ready..."
 until cilium status --wait; do
     warn "Cilium status check timed out or not ready yet. Retrying in 5 seconds..."
@@ -1132,10 +1174,10 @@ done
 success "Cilium CNI is fully operational."
 
 # ------------------------------------------------------------------------------
-# Step 25: Install Longhorn (LONGHORN_VERSION / LONGHORN_PORT from inventory.txt)
+# Step 26: Install Longhorn (LONGHORN_VERSION / LONGHORN_PORT from inventory.txt)
 # ------------------------------------------------------------------------------
 # The node prerequisites (nfs-common, multipath off, kernel modules, iscsid) are done on the golden node in step 11.
-step_header "25" "Install Longhorn ${LONGHORN_VERSION}"
+step_header "26" "Install Longhorn ${LONGHORN_VERSION}"
 if [[ ! "$LONGHORN_PORT" =~ ^[0-9]+$ ]] || [ "$LONGHORN_PORT" -lt 1 ] || [ "$LONGHORN_PORT" -gt 65535 ]; then
     error "Invalid LONGHORN_PORT='${LONGHORN_PORT}' in inventory.txt! It must be a port number (1-65535)."
     exit 1
@@ -1167,17 +1209,17 @@ kubectl apply -f "$LONGHORN_MANIFEST"
 success "Longhorn ${LONGHORN_VERSION} applied (UI at http://${VIP}:${LONGHORN_PORT}); its pods keep starting in the background."
 
 # ------------------------------------------------------------------------------
-# Step 26: Check all nodes are in Ready status
+# Step 27: Check all nodes are in Ready status
 # ------------------------------------------------------------------------------
-step_header "26" "Verify all cluster nodes are Ready"
+step_header "27" "Verify all cluster nodes are Ready"
 info "Waiting for all nodes to report condition Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
 
 # ------------------------------------------------------------------------------
-# Step 27: Apply dnsutils test pod
+# Step 28: Apply dnsutils test pod
 # ------------------------------------------------------------------------------
-step_header "27" "Apply dnsutils test pod"
+step_header "28" "Apply dnsutils test pod"
 kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
