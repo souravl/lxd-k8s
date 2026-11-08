@@ -5,7 +5,8 @@
 # but the actual number of control plane and worker nodes (NUM_CP, NUM_WORKER),
 # static IP addresses (VIP, BRIDGE_IPV4, NODE1_IP, NODE2_IP, ...), hardware sizing
 # (LIMITS_CPU, LIMITS_MEMORY, LIMITS_DISK), Ubuntu release (UBUNTU_VERSION),
-# and software versions (KUBERNETES_VERSION, CILIUM_VERSION) are configured in 'inventory.txt'.
+# software versions (KUBERNETES_VERSION, CILIUM_VERSION, LONGHORN_VERSION), and the Longhorn UI port (LONGHORN_PORT)
+# are configured in 'inventory.txt'.
 # ==============================================================================
 
 1. Install Hypervisor & Virtualization Tools:
@@ -80,7 +81,10 @@ EOF
    - ii)  Create node1 disk in /var/lib/libvirt/images/ from base image and resize to $LIMITS_DISK (e.g. 20G or 15G):
           sudo cp ./images/ubuntu-24.04-base.qcow2 /var/lib/libvirt/images/node1.qcow2
           sudo qemu-img resize /var/lib/libvirt/images/node1.qcow2 20G
-   - iii) Prepare cloud-init user-data file with $USER, passwordless sudo, and public SSH key:
+   - iii) Prepare cloud-init user-data file with $USER, passwordless sudo, and public SSH key.
+          If neither ~/.ssh/id_ed25519.pub nor ~/.ssh/id_rsa.pub exists, the script generates ~/.ssh/id_ed25519. If a private key
+          (id_ed25519 or id_rsa) exists without its .pub file, the script stops with an error and prints the command to create it:
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > ~/.ssh/id_ed25519.pub
           SSH_PUB_KEY=$(cat ~/.ssh/id_ed25519.pub 2>/dev/null || cat ~/.ssh/id_rsa.pub)
           cat <<EOF > cloud-init-user-data.yaml
 #cloud-config
@@ -100,14 +104,16 @@ EOF
             --name node1 \
             --vcpus 4 \
             --memory 4096 \
-            --os-variant ubuntu24.04 \
+            --osinfo ubuntu24.04 \
             --disk path=/var/lib/libvirt/images/node1.qcow2,format=qcow2,bus=virtio,cache=none \
             --network network=default,model=virtio,mac=52:54:00:10:00:0a \
             --cloud-init user-data=./cloud-init-user-data.yaml \
             --import \
             --noautoconsole
    - v)   Wait for node1 to finish booting and become reachable over SSH:
-          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@10.67.38.10" "true" 2>/dev/null; do
+          (The polling ssh calls here and in step 12 use "-o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3", so a
+           connection that hangs after connecting, for example because the VM reboots, fails after ~6 seconds and is retried.)
+          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3 "$USER@10.67.38.10" "true" 2>/dev/null; do
               sleep 2
           done
 
@@ -116,7 +122,7 @@ EOF
       echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5" | sudo tee -a /etc/hosts
       ssh "$USER@node1" 'echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5" | sudo tee -a /etc/hosts'
 
-11. On node1 (Prepare Golden Node: OS update, containerd, and Kubernetes packages):
+11. On node1 (Prepare Golden Node: OS update, containerd, Kubernetes packages, and Longhorn prerequisites):
     i)   Update and upgrade all OS packages:
          sudo apt-get update && sudo apt-get upgrade -y
 
@@ -143,12 +149,19 @@ EOF
 
     v)   Install containerd and qemu-guest-agent:
          sudo apt-get update
-         sudo apt-get install -y ca-certificates curl jq qemu-guest-agent
+         sudo apt-get install -y ca-certificates curl gpg apt-transport-https jq qemu-guest-agent
          sudo systemctl enable --now qemu-guest-agent
          sudo install -m 0755 -d /etc/apt/keyrings
          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
          sudo chmod a+r /etc/apt/keyrings/docker.asc
-         echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+         sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
          sudo apt-get update
          sudo apt-get install -y containerd.io
 
@@ -185,7 +198,23 @@ EOF
     xii) Reload systemd daemon and restart containerd:
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
-    xiii) Generalize netplan configuration on node1 so all cloned VMs match their interfaces:
+    xiii) Longhorn prerequisites on node1 (done before cloning, so every node inherits them; the 'systemctl stop/disable' lines
+         may fail for units that do not exist on this Ubuntu release, e.g. multipath-tools-boot - the script ignores that):
+         sudo apt-get update
+         sudo apt-get install -y nfs-common
+         for UNIT in multipathd.service multipathd.socket multipath-tools.service multipath-tools-boot.service; do
+           sudo systemctl stop $UNIT
+           sudo systemctl disable $UNIT
+         done
+         sudo modprobe dm_crypt
+         echo dm_crypt | sudo tee /etc/modules-load.d/longhorn.conf
+         sudo modprobe iscsi_tcp
+         echo iscsi_tcp | sudo tee -a /etc/modules-load.d/longhorn.conf
+         sudo modprobe nfs
+         echo nfs | sudo tee -a /etc/modules-load.d/longhorn.conf
+         sudo systemctl start iscsid
+         sudo systemctl enable iscsid
+    xiv) Generalize netplan configuration on node1 so all cloned VMs match their interfaces:
          sudo tee /etc/netplan/50-cloud-init.yaml <<EOF
 network:
   version: 2
@@ -198,7 +227,7 @@ network:
 EOF
          sudo chmod 600 /etc/netplan/50-cloud-init.yaml
          sudo netplan apply
-    xiv) Exit out of node1 back to host machine.
+    xv)  Exit out of node1 back to host machine.
 
 12. Clone remaining nodes (node2 .. nodeN) from node1 (Golden Image):
     i)   Gracefully shut down node1:
@@ -218,34 +247,43 @@ EOF
          virsh start node1
          virsh start node2
          virsh start node3
-    v)   Personalize node2 (set hostname, regenerate unique machine-id and SSH host keys, and reboot cleanly):
+    v)   Personalize node2 (note its boot ID first, then set hostname, regenerate unique machine-id and SSH host keys, and reboot cleanly):
+         ssh "$USER@node2" "cat /proc/sys/kernel/random/boot_id"
          ssh "$USER@node2" "sudo hostnamectl set-hostname node2 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo rm -f /etc/ssh/ssh_host_* && sudo ssh-keygen -A && sudo reboot"
-    vi)  Personalize node3 (set hostname, regenerate unique machine-id and SSH host keys, and reboot cleanly):
+    vi)  Personalize node3 (note its boot ID first, then set hostname, regenerate unique machine-id and SSH host keys, and reboot cleanly):
+         ssh "$USER@node3" "cat /proc/sys/kernel/random/boot_id"
          ssh "$USER@node3" "sudo hostnamectl set-hostname node3 && sudo rm -f /etc/machine-id /var/lib/dbus/machine-id && sudo systemd-machine-id-setup && sudo rm -f /etc/ssh/ssh_host_* && sudo ssh-keygen -A && sudo reboot"
          # (Repeat personalization for any worker nodes, e.g. node4 and node5)
     vii) Wait for all nodes (node1 .. nodeN) to boot/reboot, verify SSH connectivity and hostnames, and populate known_hosts:
-         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node1" "hostname" 2>/dev/null; do sleep 1; done
-         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node2" "hostname" 2>/dev/null; do sleep 1; done
-         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 "$USER@node3" "hostname" 2>/dev/null; do sleep 1; done
+         (For each clone, first wait until "cat /proc/sys/kernel/random/boot_id" over SSH returns a value different from the one noted
+          before its reboot (the script gives up after 600 seconds), so that an answer from the still-running old boot is not taken as
+          "rebooted". The polling ssh calls use ServerAliveInterval=2 and ServerAliveCountMax=3, see step 9 v.)
+         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3 "$USER@node1" "hostname" 2>/dev/null; do sleep 1; done
+         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3 "$USER@node2" "hostname" 2>/dev/null; do sleep 1; done
+         until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3 "$USER@node3" "hostname" 2>/dev/null; do sleep 1; done
          ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
 13. For node1 (Bootstrap Control Plane):
     i)    Copy parameterized kubeadm-init-config.yaml to node1:
-          Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), and ${CERT_SANS}
+          Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), ${KUBERNETES_FULL_VERSION}
+          (the full version of the kubeadm installed on node1, from 'kubeadm version -o short', for example v1.37.2;
+           it is set as kubernetesVersion so kubeadm does not look up the latest version on dl.k8s.io), and ${CERT_SANS}
           (a YAML list including 127.0.0.1, localhost, 10.67.38.250, and each control plane's IP and hostname).
           scp kubeadm-init-config.yaml node1:~/kubeadm-init-config.yaml
     ii)   Generate kube-vip static pod manifest on node1 in /tmp/kube-vip.yaml:
+          INTERFACE=$(ip -4 route show default | awk '{print $5}' | head -n1)    # e.g. enp1s0
           KVVERSION=$(curl -sL https://api.github.com/repos/kube-vip/kube-vip/releases | jq -r ".[0].name" 2>/dev/null || echo "v1.3.0")
           sudo ctr image pull ghcr.io/kube-vip/kube-vip:$KVVERSION
           sudo mkdir -p /etc/kubernetes/manifests
           sudo ctr run --rm --net-host ghcr.io/kube-vip/kube-vip:$KVVERSION vip /kube-vip manifest pod \
-              --interface enp1s0 \
+              --interface "$INTERFACE" \
               --address 10.67.38.250 \
               --controlplane \
               --services \
               --arp \
               --leaderElection | sudo tee /tmp/kube-vip.yaml
-          (Note: enp1s0 is the standard virtio network interface name in KVM virtual machines).
+          (Note: INTERFACE is the interface of node1's default route; the script falls back to enp1s0, the standard virtio
+           network interface name in KVM virtual machines, if no default route is found.)
     iii)  Temporarily update hostPath to super-admin.conf in /tmp/kube-vip.yaml before placing in manifests:
           sudo sed -i '/hostPath:/{n;s/admin.conf/super-admin.conf/;}' /tmp/kube-vip.yaml
           sudo cp -f /tmp/kube-vip.yaml /etc/kubernetes/manifests/kube-vip.yaml
@@ -301,8 +339,27 @@ EOF
            sudo kubeadm join --config ./kubeadm-join-worker-config.yaml
       iii) Exit out of node back to host machine.
 
-19. Install host tools:
-    On the host machine, install Cilium CLI, Helm, and Kubectl:
+19. Install the certificate check and renewal scripts on the control plane nodes:
+    For each control plane node (node1 .. node${NUM_CP}); worker nodes get nothing. The files are in the certs/ folder next to the script:
+      i)   SCP check_k8s_certs.sh, renew_k8s_control_plane_certs.sh, check_k8s_certs.service and check_k8s_certs.timer to /tmp on the node.
+      ii)  Install the two scripts to /usr/local/bin (mode 0755) and the service and timer to /etc/systemd/system (mode 0644):
+           sudo install -m 0755 /tmp/check_k8s_certs.sh /usr/local/bin/check_k8s_certs.sh
+           sudo install -m 0755 /tmp/renew_k8s_control_plane_certs.sh /usr/local/bin/renew_k8s_control_plane_certs.sh
+           sudo install -m 0644 /tmp/check_k8s_certs.service /etc/systemd/system/check_k8s_certs.service
+           sudo install -m 0644 /tmp/check_k8s_certs.timer /etc/systemd/system/check_k8s_certs.timer
+      iii) Set DEPLOY_USER in the installed renew_k8s_control_plane_certs.sh to $USER (the script also replaces that user's ~/.kube/config):
+           sudo sed -i "s|^DEPLOY_USER=.*|DEPLOY_USER=\"$USER\"|" /usr/local/bin/renew_k8s_control_plane_certs.sh
+      iv)  Remove the files from /tmp and enable the timer (it runs the check 2 hours after boot and then every 12 hours as root; the check runs
+           renew_k8s_control_plane_certs.sh when a control plane certificate expires within 60 days):
+           sudo systemctl daemon-reload
+           sudo systemctl enable --now check_k8s_certs.timer
+    (renew_k8s_kubelet_client_cert.sh, which renews the kubelet client certificate of one node, is not installed. Run it by hand on the host.
+     Before that, set FIRST_NODE in the script to node1 (the deploy script does this in the repo copy of the script, so it changes the file on every run):
+       sed -i "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" certs/renew_k8s_kubelet_client_cert.sh
+       ./certs/renew_k8s_kubelet_client_cert.sh <node-name>)
+
+20. Install host tools:
+    On the host machine, install Cilium CLI, Helm, Kubectl, and yq (each is skipped if already installed):
     i)   Install Cilium CLI:
          CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
          CLI_ARCH=amd64; if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
@@ -319,30 +376,60 @@ EOF
          echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
          sudo apt-get update -qq && sudo apt-get install -y kubectl
          sudo apt-mark hold kubectl
+    iv)  Install yq (mikefarah/yq, latest release, SHA-256 verified):
+         YQ_ARCH=amd64; if [ "$(uname -m)" = "aarch64" ]; then YQ_ARCH=arm64; fi
+         YQ_BASE_URL="https://github.com/mikefarah/yq/releases/latest/download"
+         YQ_BIN="yq_linux_${YQ_ARCH}"
+         curl -L --fail --progress-bar "${YQ_BASE_URL}/${YQ_BIN}" -o /tmp/${YQ_BIN}
+         curl -L --fail -s "${YQ_BASE_URL}/checksums" -o /tmp/yq_checksums
+         curl -L --fail -s "${YQ_BASE_URL}/checksums_hashes_order" -o /tmp/yq_checksums_hashes_order
+         # 'checksums' has one column per hash type (filename first); pick the SHA-256 column using 'checksums_hashes_order'
+         YQ_SHA_LINE=$(grep -n -x 'SHA-256' /tmp/yq_checksums_hashes_order | head -n 1 | cut -d: -f1)
+         awk -v bin="$YQ_BIN" -v col="$((YQ_SHA_LINE + 1))" '$1 == bin {print $col}' /tmp/yq_checksums
+         sha256sum /tmp/${YQ_BIN}    # must match the value printed above
+         sudo install -m 0755 /tmp/${YQ_BIN} /usr/local/bin/yq
+         rm -f /tmp/${YQ_BIN} /tmp/yq_checksums /tmp/yq_checksums_hashes_order
 
-20. Remove control-plane taints from control plane nodes:
+21. Remove control-plane taints from control plane nodes:
     Run on host for each control plane node (node1 .. node${NUM_CP}):
       kubectl taint nodes <node> node-role.kubernetes.io/control-plane-
     (Allows scheduling user and system workloads across control plane nodes)
 
-21. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
+22. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
     helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
 
-22. Render Cilium deployment manifest:
+23. Render Cilium deployment manifest:
     helm template cilium ./cilium-${CILIUM_VERSION}.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 
-23. Apply Cilium CNI to the cluster:
+24. Apply Cilium CNI to the cluster:
     kubectl apply -f ./cilium.yaml
 
-24. Wait for Cilium deployment readiness:
+25. Wait for Cilium deployment readiness:
     Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
 
-25. Verify all nodes reach 'Ready' status:
+26. Install Longhorn (LONGHORN_VERSION and LONGHORN_PORT from inventory.txt; the node prerequisites were done on node1 in step 11 xiii):
+    i)   Download the Longhorn manifest (the script saves it as longhorn-${LONGHORN_VERSION}.yaml, so a longhorn.yaml in the directory is not overwritten):
+         curl -s -L --fail "https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml" -o longhorn-${LONGHORN_VERSION}.yaml
+    ii)  Patch the manifest (yq on the host; <VIP> is the VIP of the cluster, e.g. 10.67.38.250; LONGHORN_PORT must be 1-65535):
+         a) Service "longhorn-frontend": add <VIP> as externalIP and change the port named "http" from 80 to ${LONGHORN_PORT}:
+              spec:
+                externalIPs: ["<VIP>"]
+                ports:
+                - name: http
+                  port: ${LONGHORN_PORT}
+         b) ConfigMap "longhorn-default-setting": add this line to the end of default-setting.yaml (unless it is already there):
+              guaranteed-instance-manager-cpu: 0
+         (The script does this with one yq command on the multi-document file and verifies the three values afterwards.)
+    iii) Apply the manifest (the Longhorn pods keep starting in the background):
+         kubectl apply -f ./longhorn-${LONGHORN_VERSION}.yaml
+    The Longhorn UI is then at http://<VIP>:${LONGHORN_PORT}.
+
+27. Verify all nodes reach 'Ready' status:
     Wait for all cluster nodes to report condition Ready:
       kubectl wait --for=condition=Ready nodes --all --timeout=300s
       kubectl get nodes -o wide
 
-26. Deploy test workload:
+28. Deploy test workload:
     kubectl apply -f dnsutils.yaml
     kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
     kubectl get pods -A

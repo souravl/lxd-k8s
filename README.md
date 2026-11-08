@@ -20,10 +20,13 @@ Initial inspiration for this project came from [justmeandopensource/kubernetes (
 - **Dynamic SANs & Host Key Isolation**:
   - Automatically generates dynamic `certSANs` in `kubeadm-init-config.yaml` for all control plane nodes.
   - Automatically regenerates unique SSH host keys (`ssh-keygen -A`) on all cloned nodes to prevent host key collisions.
+  - Sets `kubernetesVersion` in `kubeadm-init-config.yaml` (step 13) to the full version of the kubeadm installed on node1 (`kubeadm version -o short`, for example `v1.37.2`), so kubeadm does not look up the latest version on `dl.k8s.io` (it times out without internet).
+- **Certificate Check & Renewal**: Step 19 installs `check_k8s_certs.sh` and `renew_k8s_control_plane_certs.sh` to `/usr/local/bin` and a systemd service and timer (check every 12 hours, renew when a control plane certificate expires within 60 days) on every control plane node.
 - **Modern Networking & CNI**: Cilium eBPF CNI with Hubble network observability.
-- **Configurable Inventory**: Centralized configuration in `inventory.txt` (Node static IPs, resource sizing for CPU/RAM/Disk, Ubuntu release, Kubernetes, Cilium).
+- **Persistent Storage (Longhorn, libvirt only)**: Step 26 of `deploy_k8s_libvirt.sh` installs Longhorn `${LONGHORN_VERSION}` from its upstream manifest (saved as `longhorn-<version>.yaml`) after patching it: the `longhorn-frontend` service gets `${VIP}` as externalIP and port `${LONGHORN_PORT}` (UI at `http://${VIP}:${LONGHORN_PORT}`), and `guaranteed-instance-manager-cpu: 0` is added to the default settings. The node prerequisites (`nfs-common`, multipath off, `dm_crypt` / `iscsi_tcp` / `nfs` modules, `iscsid`) are installed on the golden node in step 11. `deploy_k8s.sh` does not install Longhorn.
+- **Configurable Inventory**: Centralized configuration in `inventory.txt` (Node static IPs, resource sizing for CPU/RAM/Disk, Ubuntu release, Kubernetes, Cilium, and for libvirt the Longhorn version and UI port: `LONGHORN_VERSION` / `LONGHORN_PORT`).
 - **Firewall Coexistence**: Idempotent iptables rules allowing Docker and container/VM bridges (`incusbr0`, `lxdbr0`, or `virbr0`) to coexist seamlessly.
-- **Self-Contained Deployment**: Master deployment scripts (`deploy_k8s.sh` and `deploy_k8s_libvirt.sh`) contain all orchestration, node provisioning, runtime installation, node cloning, host tooling, and firewall configuration inline with zero external script dependencies.
+- **Self-Contained Deployment**: Master deployment scripts (`deploy_k8s.sh` and `deploy_k8s_libvirt.sh`) contain all orchestration, node provisioning, runtime installation, node cloning, host tooling (Cilium CLI, Helm, kubectl; `deploy_k8s_libvirt.sh` also installs `yq`), and firewall configuration inline. The only files they read besides `inventory.txt` are the YAML manifests and the `certs/` scripts listed below.
 
 ---
 
@@ -62,6 +65,13 @@ LIMITS_DISK="15GB"
 UBUNTU_VERSION="24.04"
 KUBERNETES_VERSION="v1.37"
 CILIUM_VERSION="1.20.2"
+
+# Longhorn (deploy_k8s_libvirt.sh step 26 only; deploy_k8s.sh does not use these): the manifest for this Git tag is
+# downloaded (saved as longhorn-${LONGHORN_VERSION}.yaml), patched and applied.
+# LONGHORN_PORT is the port of the longhorn-frontend (UI) service (upstream default 80); the service gets ${VIP} as externalIP,
+# so the UI is reachable at http://${VIP}:${LONGHORN_PORT}.
+LONGHORN_VERSION="v1.13.0"
+LONGHORN_PORT="9080"
 ```
 
 ### 2. Deploy with Incus (Default Containers)
@@ -87,16 +97,19 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 
 | File | Description |
 | :--- | :--- |
-| `inventory.txt` | Cluster inventory: Node static IPs, resource sizing, OS version, and Kubernetes / Cilium versions |
+| `inventory.txt` | Cluster inventory: Node static IPs, resource sizing, OS version, Kubernetes / Cilium versions, and (libvirt only) the Longhorn version and UI port (`LONGHORN_VERSION` / `LONGHORN_PORT`) |
 | `deploy_k8s.sh` | Master deployment script for Incus and LXD system containers (`-c incus\|lxd`) |
-| `deploy_k8s_libvirt.sh` | Master deployment script for libvirt (KVM Virtual Machines) |
+| `deploy_k8s_libvirt.sh` | Master deployment script for libvirt (KVM Virtual Machines); it also installs `yq` on the host, prepares the golden node for Longhorn (`nfs-common`, multipath services disabled, kernel modules `dm_crypt` / `iscsi_tcp` / `nfs` loaded at boot, `iscsid` enabled) in step 11 and installs Longhorn in step 26 |
 | `steps.txt` | Unified step-by-step manual guide for Incus and LXD |
 | `steps_libvirt.txt` | Step-by-step manual guide for libvirt (KVM Virtual Machines) |
 | `container-engine-init-config.yaml` | Parameterized container engine preseed configuration (Incus/LXD) |
 | `k8s-container-profile-config.yaml` | Parameterized container profile for Kubernetes (Incus/LXD) |
-| `kubeadm-init-config.yaml` | Parameterized kubeadm init configuration with dynamic `certSANs` for bootstrap control plane |
+| `kubeadm-init-config.yaml` | Parameterized kubeadm init configuration with dynamic `certSANs` and `kubernetesVersion` (`${KUBERNETES_FULL_VERSION}`, the kubeadm version installed on node1) for bootstrap control plane |
 | `kubeadm-join-cp-config.yaml` | Parameterized kubeadm join configuration for secondary control planes |
 | `kubeadm-join-worker-config.yaml` | Parameterized kubeadm join configuration for worker nodes |
 | `cilium-deploy.yaml` | Helm values configuration for Cilium CNI installation |
 | `dnsutils.yaml` | DNS verification testing pod manifest |
+| `certs/check_k8s_certs.sh`, `certs/renew_k8s_control_plane_certs.sh` | Control plane certificate check and renewal scripts; step 19 installs them to `/usr/local/bin` on every control plane node (not on workers) and sets `DEPLOY_USER` in the renewal script to the login user. The check script skips the renewal unless a control plane certificate expires within 60 days; the renewal script exits on a node without `/etc/kubernetes/manifests/kube-apiserver.yaml` |
+| `certs/check_k8s_certs.service`, `certs/check_k8s_certs.timer` | systemd one-shot service (runs the check script as root) and its timer (2 hours after boot, then every 12 hours); step 19 installs them to `/etc/systemd/system` and enables the timer |
+| `certs/renew_k8s_kubelet_client_cert.sh` | Not installed on the nodes. Run by hand on the host to renew the kubelet client certificate of one node: `./certs/renew_k8s_kubelet_client_cert.sh <node-name>` (step 19 sets `FIRST_NODE` at the top of this repo copy to `node1`, so it changes the file on every deploy run) |
 | `WALKTHROUGH.md` | Detailed architectural overview and live verification report |
