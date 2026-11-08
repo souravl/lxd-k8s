@@ -72,6 +72,8 @@ fi
 export UBUNTU_VERSION="${UBUNTU_VERSION:-24.04}"
 export KUBERNETES_VERSION="${KUBERNETES_VERSION:-v1.37}"
 export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
+export LONGHORN_VERSION="${LONGHORN_VERSION:-v1.13.0}"
+export LONGHORN_PORT="${LONGHORN_PORT:-9080}"
 export LIBVIRT_DEFAULT_URI="${LIBVIRT_DEFAULT_URI:-qemu:///system}"
 
 VIP="${VIP:-10.67.38.250}"
@@ -529,7 +531,7 @@ success "node1 /etc/hosts configuration complete."
 # ------------------------------------------------------------------------------
 # Step 11: Configure Golden Node (node1) with runtime & k8s packages
 # ------------------------------------------------------------------------------
-step_header "11" "Prepare Golden Node (node1) with OS updates, containerd, and Kubernetes packages"
+step_header "11" "Prepare Golden Node (node1) with OS updates, containerd, Kubernetes packages, and Longhorn prerequisites"
 NODE="node1"
 info "--- Configuring runtime and Kubernetes binaries on $NODE ---"
 
@@ -616,7 +618,25 @@ DOCKER_EOF
     sudo systemctl daemon-reload
     sudo systemctl restart containerd
 
-    echo "==> 9. Generalizing netplan configuration for cloned nodes..."
+    echo "==> 9. Longhorn prerequisites (nfs-common, multipath off, kernel modules, iscsid)..."
+    # Done on the golden node so every cloned node inherits it. The 'systemctl stop/disable' calls end with
+    # '|| true' because some multipath units do not exist on every Ubuntu release (e.g. multipath-tools-boot).
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq nfs-common
+    for UNIT in multipathd.service multipathd.socket multipath-tools.service multipath-tools-boot.service; do
+        sudo systemctl stop "$UNIT" 2>/dev/null || true
+        sudo systemctl disable "$UNIT" 2>/dev/null || true
+    done
+    sudo modprobe dm_crypt
+    echo dm_crypt | sudo tee /etc/modules-load.d/longhorn.conf >/dev/null
+    sudo modprobe iscsi_tcp
+    echo iscsi_tcp | sudo tee -a /etc/modules-load.d/longhorn.conf >/dev/null
+    sudo modprobe nfs
+    echo nfs | sudo tee -a /etc/modules-load.d/longhorn.conf >/dev/null
+    sudo systemctl start iscsid
+    sudo systemctl enable iscsid
+
+    echo "==> 10. Generalizing netplan configuration for cloned nodes..."
     sudo tee /etc/netplan/50-cloud-init.yaml >/dev/null <<NETPLAN_EOF
 network:
   version: 2
@@ -950,7 +970,7 @@ fi
 # ------------------------------------------------------------------------------
 # Step 19: Install cilium CLI, helm, and kubectl on host
 # ------------------------------------------------------------------------------
-step_header "19" "Install cilium CLI, Helm, and Kubectl on host"
+step_header "19" "Install cilium CLI, Helm, Kubectl, and yq on host"
 
 # i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
@@ -1016,6 +1036,38 @@ else
     sudo apt-mark hold kubectl
     success "Kubectl installed successfully."
 fi
+
+# iv) yq (mikefarah/yq, latest release)
+if command -v yq >/dev/null 2>&1; then
+    info "yq is already installed ($(command -v yq)). Skipping."
+else
+    info "Installing yq (latest release) on host..."
+    YQ_ARCH=amd64
+    if [ "$(uname -m)" = "aarch64" ]; then YQ_ARCH=arm64; fi
+    YQ_BASE_URL="https://github.com/mikefarah/yq/releases/latest/download"
+    YQ_BIN="yq_linux_${YQ_ARCH}"
+
+    info "Downloading ${YQ_BIN}..."
+    TMP_YQ_DIR=$(mktemp -d)
+    curl -L --fail --progress-bar "${YQ_BASE_URL}/${YQ_BIN}" -o "${TMP_YQ_DIR}/${YQ_BIN}"
+    curl -L --fail -s "${YQ_BASE_URL}/checksums" -o "${TMP_YQ_DIR}/checksums"
+    curl -L --fail -s "${YQ_BASE_URL}/checksums_hashes_order" -o "${TMP_YQ_DIR}/checksums_hashes_order"
+
+    # The 'checksums' file has one column per hash type (filename first); find the SHA-256 column.
+    info "Verifying SHA256 checksum..."
+    YQ_SHA_LINE=$(grep -n -x 'SHA-256' "${TMP_YQ_DIR}/checksums_hashes_order" | head -n 1 | cut -d: -f1)
+    YQ_EXPECTED_SHA=$(awk -v bin="$YQ_BIN" -v col="$((YQ_SHA_LINE + 1))" '$1 == bin {print $col}' "${TMP_YQ_DIR}/checksums")
+    YQ_ACTUAL_SHA=$(sha256sum "${TMP_YQ_DIR}/${YQ_BIN}" | awk '{print $1}')
+    if [ -z "$YQ_EXPECTED_SHA" ] || [ "$YQ_EXPECTED_SHA" != "$YQ_ACTUAL_SHA" ]; then
+        error "yq checksum verification failed for ${YQ_BIN}"
+        rm -rf "$TMP_YQ_DIR"
+        exit 1
+    fi
+
+    sudo install -m 0755 "${TMP_YQ_DIR}/${YQ_BIN}" /usr/local/bin/yq
+    rm -rf "$TMP_YQ_DIR"
+    success "yq $(yq --version | awk '{print $NF}') installed successfully."
+fi
 success "Host tooling ready."
 
 # ------------------------------------------------------------------------------
@@ -1071,17 +1123,52 @@ done
 success "Cilium CNI is fully operational."
 
 # ------------------------------------------------------------------------------
-# Step 25: Check all nodes are in Ready status
+# Step 25: Install Longhorn (LONGHORN_VERSION / LONGHORN_PORT from inventory.txt)
 # ------------------------------------------------------------------------------
-step_header "25" "Verify all cluster nodes are Ready"
+# The node prerequisites (nfs-common, multipath off, kernel modules, iscsid) are done on the golden node in step 11.
+step_header "25" "Install Longhorn ${LONGHORN_VERSION}"
+if [[ ! "$LONGHORN_PORT" =~ ^[0-9]+$ ]] || [ "$LONGHORN_PORT" -lt 1 ] || [ "$LONGHORN_PORT" -gt 65535 ]; then
+    error "Invalid LONGHORN_PORT='${LONGHORN_PORT}' in inventory.txt! It must be a port number (1-65535)."
+    exit 1
+fi
+# Saved under a versioned name so a longhorn.yaml kept in this directory is never overwritten.
+LONGHORN_MANIFEST="${SCRIPT_DIR}/longhorn-${LONGHORN_VERSION}.yaml"
+info "Downloading the Longhorn ${LONGHORN_VERSION} manifest to ${LONGHORN_MANIFEST}..."
+curl -s -L --fail "https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml" -o "$LONGHORN_MANIFEST"
+
+info "Patching the manifest: longhorn-frontend externalIP ${VIP}, port ${LONGHORN_PORT}; guaranteed-instance-manager-cpu: 0..."
+# 1) Service longhorn-frontend: externalIPs = [VIP] and port of the 'http' port (default 80) = LONGHORN_PORT.
+# 2) ConfigMap longhorn-default-setting: append 'guaranteed-instance-manager-cpu: 0' to default-setting.yaml
+#    (skipped if the manifest already has that setting, so the key can never be duplicated).
+LONGHORN_VIP="$VIP" LONGHORN_PORT="$LONGHORN_PORT" yq -i '
+    (select(.kind == "Service" and .metadata.name == "longhorn-frontend") | .spec.externalIPs) = [strenv(LONGHORN_VIP)] |
+    (select(.kind == "Service" and .metadata.name == "longhorn-frontend") | .spec.ports[] | select(.name == "http") | .port) = (strenv(LONGHORN_PORT) | tonumber) |
+    (select(.kind == "ConfigMap" and .metadata.name == "longhorn-default-setting" and ((.data["default-setting.yaml"] | contains("guaranteed-instance-manager-cpu")) | not)) | .data["default-setting.yaml"]) += "\nguaranteed-instance-manager-cpu: 0"
+' "$LONGHORN_MANIFEST"
+# Fail early if a patch did not take effect (e.g. the upstream manifest layout changed).
+if [ "$(yq 'select(.kind == "Service" and .metadata.name == "longhorn-frontend") | .spec.externalIPs[0]' "$LONGHORN_MANIFEST")" != "$VIP" ] \
+    || [ "$(yq 'select(.kind == "Service" and .metadata.name == "longhorn-frontend") | .spec.ports[] | select(.name == "http") | .port' "$LONGHORN_MANIFEST")" != "$LONGHORN_PORT" ] \
+    || ! yq 'select(.kind == "ConfigMap" and .metadata.name == "longhorn-default-setting") | .data["default-setting.yaml"]' "$LONGHORN_MANIFEST" | grep -q '^guaranteed-instance-manager-cpu: 0$'; then
+    error "Patching ${LONGHORN_MANIFEST} failed: longhorn-frontend service or longhorn-default-setting configmap not as expected."
+    exit 1
+fi
+
+info "Applying ${LONGHORN_MANIFEST}..."
+kubectl apply -f "$LONGHORN_MANIFEST"
+success "Longhorn ${LONGHORN_VERSION} applied (UI at http://${VIP}:${LONGHORN_PORT}); its pods keep starting in the background."
+
+# ------------------------------------------------------------------------------
+# Step 26: Check all nodes are in Ready status
+# ------------------------------------------------------------------------------
+step_header "26" "Verify all cluster nodes are Ready"
 info "Waiting for all nodes to report condition Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
 
 # ------------------------------------------------------------------------------
-# Step 26: Apply dnsutils test pod
+# Step 27: Apply dnsutils test pod
 # ------------------------------------------------------------------------------
-step_header "26" "Apply dnsutils test pod"
+step_header "27" "Apply dnsutils test pod"
 kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
