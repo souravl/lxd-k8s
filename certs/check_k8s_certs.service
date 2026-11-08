@@ -1,0 +1,6 @@
+[Unit]
+Description=Check Kubernetes Certificates
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/check_k8s_certs.sh

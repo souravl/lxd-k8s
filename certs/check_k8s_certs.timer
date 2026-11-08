@@ -1,0 +1,9 @@
+[Unit]
+Description=Check Kubernetes Certificates Every 12 Hours
+
+[Timer]
+OnBootSec=2hours
+OnUnitInactiveSec=12hours
+
+[Install]
+WantedBy=timers.target
