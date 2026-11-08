@@ -798,9 +798,18 @@ done
 
 # Copy parameterized kubeadm-init-config.yaml to node1
 info "Copying parameterized kubeadm-init-config.yaml to node1..."
+# ${KUBERNETES_FULL_VERSION} is the full version of the kubeadm installed on node1 (for example v1.37.2). Setting it as
+# kubernetesVersion stops kubeadm from trying to look up the latest version on dl.k8s.io (it times out without internet).
+KUBERNETES_FULL_VERSION=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "kubeadm version -o short" || true)
+if ! [[ "$KUBERNETES_FULL_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    error "Could not read the kubeadm version from node1 (got '${KUBERNETES_FULL_VERSION}')."
+    exit 1
+fi
+info "Kubernetes version for kubeadm init: ${KUBERNETES_FULL_VERSION}"
 INIT_CONFIG=$(< "${SCRIPT_DIR}/kubeadm-init-config.yaml")
 INIT_CONFIG="${INIT_CONFIG//\$\{NODE1_IP\}/$NODE1_IP}"
 INIT_CONFIG="${INIT_CONFIG//\$\{VIP\}/$VIP}"
+INIT_CONFIG="${INIT_CONFIG//\$\{KUBERNETES_FULL_VERSION\}/$KUBERNETES_FULL_VERSION}"
 INIT_CONFIG="${INIT_CONFIG//\$\{CERT_SANS\}/$CERT_SANS_BLOCK}"
 echo "$INIT_CONFIG" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "cat > ~/kubeadm-init-config.yaml"
 
