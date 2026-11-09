@@ -1,7 +1,7 @@
 #!/bin/bash
 # Renews the kubelet client certificate of ONE node. MANUAL use only: nothing runs this script automatically.
 #
-# Usage: renew_k8s_kubelet_client_cert.sh <node-name>
+# Usage: renew_k8s_kubelet_client_cert_from_host.sh <node-name>
 #
 # Run it by hand on the libvirt host (the machine that ran deploy_k8s.sh/deploy_k8s_libvirt.sh), as the user that deployed the cluster
 # (passwordless ssh and sudo on the nodes). Nothing runs on a node by hand.

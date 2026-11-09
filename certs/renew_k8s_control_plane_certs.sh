@@ -49,7 +49,9 @@ rm -rf /tmp/k8s_manifests
 mkdir -p /tmp/k8s_manifests
 mv -f /etc/kubernetes/manifests/*.yaml /tmp/k8s_manifests/
 sleep 30
-until ! kubectl get nodes --kubeconfig=/etc/kubernetes/admin.conf > /dev/null 2>&1;
+# Talk to this node's own kube-apiserver, not the VIP (the VIP may still be served by the other control plane nodes).
+LOCAL_API=(--kubeconfig=/etc/kubernetes/admin.conf --server=https://127.0.0.1:6443)
+until ! kubectl get nodes "${LOCAL_API[@]}" > /dev/null 2>&1;
 do
     sleep 1
 done
@@ -57,7 +59,7 @@ done
 echo "Waiting for kubernetes pods to restart..."
 mv -f /tmp/k8s_manifests/*.yaml /etc/kubernetes/manifests/
 sleep 30
-until kubectl get nodes --kubeconfig=/etc/kubernetes/admin.conf 2>&1 | grep -q " Ready ";
+until kubectl get nodes "${LOCAL_API[@]}" 2>&1 | grep -q "^$(hostname) .* Ready ";
 do
     sleep 1
 done
