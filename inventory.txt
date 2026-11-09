@@ -28,10 +28,14 @@ LIMITS_CPU="2"
 LIMITS_MEMORY="3GB"
 LIMITS_DISK="15GB"
 
-# Container OS & Software Versions
+# Container/VM OS & Software Versions
 UBUNTU_VERSION="24.04"
 KUBERNETES_VERSION="v1.37"
 CILIUM_VERSION="1.20.2"
 
+# Longhorn (deploy_k8s_libvirt.sh step 26 only; deploy_k8s.sh does not use these): the manifest for this Git tag is
+# downloaded (saved as longhorn-${LONGHORN_VERSION}.yaml), patched and applied.
+# LONGHORN_PORT is the port of the longhorn-frontend (UI) service (upstream default 80); the service gets ${VIP} as externalIP,
+# so the UI is reachable at http://${VIP}:${LONGHORN_PORT}.
 LONGHORN_VERSION="v1.13.0"
 LONGHORN_PORT="9080"

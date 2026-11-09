@@ -353,10 +353,17 @@ EOF
            renew_k8s_control_plane_certs.sh when a control plane certificate expires within 60 days):
            sudo systemctl daemon-reload
            sudo systemctl enable --now check_k8s_certs.timer
-    (renew_k8s_kubelet_client_cert.sh, which renews the kubelet client certificate of one node, is not installed. Run it by hand on the host.
+    (renew_k8s_kubelet_client_cert_from_host.sh, which renews the kubelet client certificate of one node, is not installed. Run it by hand on the host.
      Before that, set FIRST_NODE in the script to node1 (the deploy script does this in the repo copy of the script, so it changes the file on every run):
-       sed -i "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" certs/renew_k8s_kubelet_client_cert.sh
-       ./certs/renew_k8s_kubelet_client_cert.sh <node-name>)
+       sed -i "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" certs/renew_k8s_kubelet_client_cert_from_host.sh
+       ./certs/renew_k8s_kubelet_client_cert_from_host.sh <node-name>)
+    (renew_k8s_control_plane_certs_from_host.sh, which renews the control plane certificates of all control plane nodes from the host, is not installed. Run it by hand on the host.
+     Before that, set FIRST_NODE, OTHER_CP_NODES and WORKER_NODES (space separated, may be empty) in the script (the deploy script does this in the repo copy of the script, so it changes the file on every run):
+       sed -i -e "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" -e "s|^OTHER_CP_NODES=.*|OTHER_CP_NODES=\"<node2 .. node${NUM_CP}>\"|" -e "s|^WORKER_NODES=.*|WORKER_NODES=\"<worker nodes>\"|" certs/renew_k8s_control_plane_certs_from_host.sh
+       ./certs/renew_k8s_control_plane_certs_from_host.sh
+     It runs sudo /usr/local/bin/renew_k8s_control_plane_certs.sh on node1, copies /etc/kubernetes/admin.conf of node1 to ~/.kube/config on the host
+     (the old one is kept as ~/.kube/_old_kube_config), runs the same renewal script on the other control plane nodes, then copies the new host
+     ~/.kube/config to ~/.kube/config of the ssh user and of root on every worker node.)
 
 20. Install host tools:
     On the host machine, install Cilium CLI, Helm, Kubectl, and yq (each is skipped if already installed):
