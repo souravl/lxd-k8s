@@ -10,9 +10,9 @@
 # ==============================================================================
 
 1. Install Hypervisor & Virtualization Tools:
-   - Install QEMU/KVM, libvirt, virtinst, and cloud tools on the host:
+   - Install QEMU/KVM, libvirt, virtinst, cloud tools, and chrony on the host:
      sudo apt-get update
-     sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools
+     sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools chrony
    - Ensure the libvirt service is enabled and running:
      sudo systemctl enable --now libvirtd
 
@@ -33,7 +33,7 @@
 vhost_net
 EOF
      sudo modprobe vhost_net
-   (Note: Kubernetes networking modules like 'overlay' and 'br_netfilter' run inside the VM guest OS and will be configured in Step 11).
+   (Note: Kubernetes networking modules like 'overlay' and 'br_netfilter' run inside the VM guest OS and will be configured in Step 12).
 
 5. Configure sysctl settings on host:
    - Ensure IP forwarding is enabled on the host for bridge NAT routing:
@@ -56,7 +56,7 @@ EOF
      virsh net-destroy default
      virsh net-start default
      virsh net-autostart default
-   (Note: Node static IPs are NOT hardcoded here; they are registered dynamically at VM creation time in Steps 9 and 12).
+   (Note: Node static IPs are NOT hardcoded here; they are registered dynamically at VM creation time in Steps 9 and 13).
 
 7. Configure Docker and bridge iptables coexistence (if Docker is running):
    - Add rules for virbr0 to DOCKER-USER chain and ensure NAT masquerading:
@@ -111,18 +111,39 @@ EOF
             --import \
             --noautoconsole
    - v)   Wait for node1 to finish booting and become reachable over SSH:
-          (The polling ssh calls here and in step 12 use "-o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3", so a
+          (The polling ssh calls here and in step 13 use "-o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3", so a
            connection that hangs after connecting, for example because the VM reboots, fails after ~6 seconds and is retried.)
           until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3 "$USER@10.67.38.10" "true" 2>/dev/null; do
               sleep 2
           done
 
-10. Configure /etc/hosts on host and inside node1:
+10. Configure chrony on host (time server for the VMs; chrony is installed in step 1):
+   - Keep the original config once, then write the new one (the allow line is the bridge subnet, e.g. 10.67.38.0/24):
+     if [ ! -f /etc/chrony/chrony.conf.bak ]; then sudo mv -f /etc/chrony/chrony.conf /etc/chrony/chrony.conf.bak; fi
+     sudo tee /etc/chrony/chrony.conf <<EOF
+# Use the local clock as a reference time source
+local stratum 8
+
+# Allow manual adjustments and use it for drift calculation
+manual
+
+# Allow VMs to connect
+allow 10.67.38.0/24
+
+# Record the rate at which the system clock gains/losses time
+driftfile /var/lib/chrony/drift
+EOF
+   - Restart chrony and check it (the Ubuntu service name is 'chrony'; 'chronyd' is an alias of it):
+     sudo systemctl restart chrony
+     chronyc -n sources
+     chronyc -n tracking
+
+11. Configure /etc/hosts on host and inside node1:
     - Map node IPs in /etc/hosts on both the host and inside node1:
       echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5" | sudo tee -a /etc/hosts
       ssh "$USER@node1" 'echo -e "10.67.38.10\tnode1\n10.67.38.20\tnode2\n10.67.38.30\tnode3\n10.67.38.40\tnode4\n10.67.38.50\tnode5" | sudo tee -a /etc/hosts'
 
-11. On node1 (Prepare Golden Node: OS update, containerd, Kubernetes packages, and Longhorn prerequisites):
+12. On node1 (Prepare Golden Node: OS update, containerd, chrony, Kubernetes packages, Longhorn prerequisites, and chrony config):
     i)   Update and upgrade all OS packages:
          sudo apt-get update && sudo apt-get upgrade -y
 
@@ -147,9 +168,9 @@ net.ipv4.ip_forward                 = 1
 EOF
          sudo sysctl --system
 
-    v)   Install containerd and qemu-guest-agent:
+    v)   Install containerd, qemu-guest-agent, and chrony:
          sudo apt-get update
-         sudo apt-get install -y ca-certificates curl gpg apt-transport-https jq qemu-guest-agent
+         sudo apt-get install -y ca-certificates curl gpg apt-transport-https jq qemu-guest-agent chrony
          sudo systemctl enable --now qemu-guest-agent
          sudo install -m 0755 -d /etc/apt/keyrings
          sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -227,9 +248,28 @@ network:
 EOF
          sudo chmod 600 /etc/netplan/50-cloud-init.yaml
          sudo netplan apply
-    xv)  Exit out of node1 back to host machine.
+    xv)  Configure chrony on node1 to sync from the host (chrony is installed in item v; done before cloning, so every
+         node inherits it). Keep the original config once, then write the new one (10.67.38.1 is BRIDGE_IPV4, the host
+         address on virbr0 that the VMs reach):
+         if [ ! -f /etc/chrony/chrony.conf.bak ]; then sudo mv -f /etc/chrony/chrony.conf /etc/chrony/chrony.conf.bak; fi
+         sudo tee /etc/chrony/chrony.conf <<EOF
+# Chrony server
+server 10.67.38.1 iburst
 
-12. Clone remaining nodes (node2 .. nodeN) from node1 (Golden Image):
+# This directive records the rate at which the system clock gains or loses time.
+driftfile /var/lib/chrony/chrony.drift
+
+# If the clock offset is larger than 1 second, step it rather than slew.
+makestep 1 3
+EOF
+         sudo systemctl restart chrony
+         chronyc -n sources
+         chronyc -n tracking
+         (The Ubuntu service name is 'chrony'; 'chronyd' is an alias of it.)
+         (BRIDGE_IPV4 is passed to node1 on the ssh command line, like KUBERNETES_VERSION: CHRONY_SERVER='<value of BRIDGE_IPV4>' bash -s)
+    xvi) Exit out of node1 back to host machine.
+
+13. Clone remaining nodes (node2 .. nodeN) from node1 (Golden Image):
     i)   Gracefully shut down node1:
          if [ "$(virsh domstate node1 2>/dev/null)" != "shut off" ]; then virsh shutdown node1 2>/dev/null || true; fi
          while [ "$(virsh domstate node1)" != "shut off" ]; do sleep 1; done
@@ -263,7 +303,7 @@ EOF
          until ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 -o ServerAliveInterval=2 -o ServerAliveCountMax=3 "$USER@node3" "hostname" 2>/dev/null; do sleep 1; done
          ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
-13. For node1 (Bootstrap Control Plane):
+14. For node1 (Bootstrap Control Plane):
     i)    Copy parameterized kubeadm-init-config.yaml to node1:
           Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), ${KUBERNETES_FULL_VERSION}
           (the full version of the kubeadm installed on node1, from 'kubeadm version -o short', for example v1.37.2;
@@ -307,17 +347,17 @@ EOF
           until kubectl get nodes >/dev/null 2>&1; do sleep 2; done
     xiii) Exit out of node1 back to host machine.
 
-14. Copy Kubernetes admin config from node1 to host machine:
+15. Copy Kubernetes admin config from node1 to host machine:
     mkdir -p $HOME/.kube
     scp "$USER@node1:/home/$USER/.kube/config" "$HOME/.kube/config"
     chmod 600 "$HOME/.kube/config"
     (Allows managing the cluster with kubectl directly from the host machine).
 
-15. Update join configuration files on host:
-    - Update kubeadm-join-cp-config.yaml with the values noted in step 13.v (${JOIN_TOKEN}, ${CA_CERT_HASH}, ${CERT_KEY}, ${VIP}, and target ${NODE_IP}).
+16. Update join configuration files on host:
+    - Update kubeadm-join-cp-config.yaml with the values noted in step 14.v (${JOIN_TOKEN}, ${CA_CERT_HASH}, ${CERT_KEY}, ${VIP}, and target ${NODE_IP}).
     - Update kubeadm-join-worker-config.yaml with ${JOIN_TOKEN}, ${CA_CERT_HASH}, ${VIP}, and target ${NODE_IP}.
 
-16. For remaining control plane nodes (node2 .. node${NUM_CP}) - Join Control Plane:
+17. For remaining control plane nodes (node2 .. node${NUM_CP}) - Join Control Plane:
     For each remaining control plane node:
       i)   SCP parameterized kubeadm-join-cp-config.yaml to the node.
       ii)  Run:
@@ -328,18 +368,18 @@ EOF
            sudo chown $(id -u):$(id -g) $HOME/.kube/config
       iv)  Exit out of node back to host machine.
 
-17. Distribute kube-vip manifest:
+18. Distribute kube-vip manifest:
     Copy /etc/kubernetes/manifests/kube-vip.yaml from node1 to /etc/kubernetes/manifests/ on all remaining control plane nodes (node2 .. node${NUM_CP}).
     (Note: Do NOT distribute kube-vip to worker nodes).
 
-18. For worker nodes (Join Worker Nodes) (if NUM_WORKER > 0):
+19. For worker nodes (Join Worker Nodes) (if NUM_WORKER > 0):
     For each worker node (node${NUM_CP+1} .. node${TOTAL_NODES}):
       i)   SCP parameterized kubeadm-join-worker-config.yaml to the worker node.
       ii)  Run:
            sudo kubeadm join --config ./kubeadm-join-worker-config.yaml
       iii) Exit out of node back to host machine.
 
-19. Install the certificate check and renewal scripts on the control plane nodes:
+20. Install the certificate check and renewal scripts on the control plane nodes:
     For each control plane node (node1 .. node${NUM_CP}); worker nodes get nothing. The files are in the certs/ folder next to the script:
       i)   SCP check_k8s_certs.sh, renew_k8s_control_plane_certs.sh, check_k8s_certs.service and check_k8s_certs.timer to /tmp on the node.
       ii)  Install the two scripts to /usr/local/bin (mode 0755) and the service and timer to /etc/systemd/system (mode 0644):
@@ -365,7 +405,7 @@ EOF
      (the old one is kept as ~/.kube/_old_kube_config), runs the same renewal script on the other control plane nodes, then copies the new host
      ~/.kube/config to ~/.kube/config of the ssh user and of root on every worker node.)
 
-20. Install host tools:
+21. Install host tools:
     On the host machine, install Cilium CLI, Helm, Kubectl, and yq (each is skipped if already installed):
     i)   Install Cilium CLI:
          CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
@@ -397,24 +437,24 @@ EOF
          sudo install -m 0755 /tmp/${YQ_BIN} /usr/local/bin/yq
          rm -f /tmp/${YQ_BIN} /tmp/yq_checksums /tmp/yq_checksums_hashes_order
 
-21. Remove control-plane taints from control plane nodes:
+22. Remove control-plane taints from control plane nodes:
     Run on host for each control plane node (node1 .. node${NUM_CP}):
       kubectl taint nodes <node> node-role.kubernetes.io/control-plane-
     (Allows scheduling user and system workloads across control plane nodes)
 
-22. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
+23. Download Cilium Helm chart (uses $CILIUM_VERSION from inventory.txt):
     helm pull oci://quay.io/cilium/charts/cilium --version ${CILIUM_VERSION}
 
-23. Render Cilium deployment manifest:
+24. Render Cilium deployment manifest:
     helm template cilium ./cilium-${CILIUM_VERSION}.tgz --namespace kube-system -f ./cilium-deploy.yaml > cilium.yaml
 
-24. Apply Cilium CNI to the cluster:
+25. Apply Cilium CNI to the cluster:
     kubectl apply -f ./cilium.yaml
 
-25. Wait for Cilium deployment readiness:
+26. Wait for Cilium deployment readiness:
     Run 'cilium status --wait' until successful completion (re-run if the command times out while resources initialize).
 
-26. Install Longhorn (LONGHORN_VERSION and LONGHORN_PORT from inventory.txt; the node prerequisites were done on node1 in step 11 xiii):
+27. Install Longhorn (LONGHORN_VERSION and LONGHORN_PORT from inventory.txt; the node prerequisites were done on node1 in step 12 xiii):
     i)   Download the Longhorn manifest (the script saves it as longhorn-${LONGHORN_VERSION}.yaml, so a longhorn.yaml in the directory is not overwritten):
          curl -s -L --fail "https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml" -o longhorn-${LONGHORN_VERSION}.yaml
     ii)  Patch the manifest (yq on the host; <VIP> is the VIP of the cluster, e.g. 10.67.38.250; LONGHORN_PORT must be 1-65535):
@@ -431,12 +471,12 @@ EOF
          kubectl apply -f ./longhorn-${LONGHORN_VERSION}.yaml
     The Longhorn UI is then at http://<VIP>:${LONGHORN_PORT}.
 
-27. Verify all nodes reach 'Ready' status:
+28. Verify all nodes reach 'Ready' status:
     Wait for all cluster nodes to report condition Ready:
       kubectl wait --for=condition=Ready nodes --all --timeout=300s
       kubectl get nodes -o wide
 
-28. Deploy test workload:
+29. Deploy test workload:
     kubectl apply -f dnsutils.yaml
     kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
     kubectl get pods -A

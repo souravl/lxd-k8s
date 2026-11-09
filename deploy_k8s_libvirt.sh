@@ -234,9 +234,9 @@ info "Nodes configuration: ${NUM_CP} control plane node(s), ${NUM_WORKER} worker
 # Step 1: Install Hypervisor & Virtualization Tools on host
 # ------------------------------------------------------------------------------
 if [ "${_SKIP_STEP1:-false}" != "true" ]; then
-    step_header "1" "Install QEMU/KVM, libvirt, and virtinst on host"
+    step_header "1" "Install QEMU/KVM, libvirt, virtinst, and chrony on host"
     MISSING_PKGS=()
-    for pkg in qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools; do
+    for pkg in qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools chrony; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then
             MISSING_PKGS+=("$pkg")
         fi
@@ -509,9 +509,39 @@ done
 success "node1 is running and accessible via SSH."
 
 # ------------------------------------------------------------------------------
-# Step 10: Configure /etc/hosts on host and inside node1
+# Step 10: Configure chrony on host (time server for the VMs)
+# chrony is installed in step 1. The host uses its own clock as the reference (local stratum 8) and lets the VMs of
+# the bridge subnet (BRIDGE_SUBNET, set in step 7) sync to it; the VMs' chrony points at BRIDGE_IPV4 (golden node, step 12).
 # ------------------------------------------------------------------------------
-step_header "10" "Configure /etc/hosts on host and inside node1"
+step_header "10" "Configure chrony on host (time server for ${BRIDGE_SUBNET})"
+if [ ! -f /etc/chrony/chrony.conf.bak ]; then
+    info "Backing up /etc/chrony/chrony.conf to /etc/chrony/chrony.conf.bak..."
+    sudo mv -f /etc/chrony/chrony.conf /etc/chrony/chrony.conf.bak
+fi
+info "Writing /etc/chrony/chrony.conf (allow ${BRIDGE_SUBNET})..."
+sudo tee /etc/chrony/chrony.conf >/dev/null <<CHRONY_EOF
+# Use the local clock as a reference time source
+local stratum 8
+
+# Allow manual adjustments and use it for drift calculation
+manual
+
+# Allow VMs to connect
+allow ${BRIDGE_SUBNET}
+
+# Record the rate at which the system clock gains/losses time
+driftfile /var/lib/chrony/drift
+CHRONY_EOF
+sudo systemctl enable chrony 2>/dev/null || true
+sudo systemctl restart chrony
+chronyc -n sources || true
+chronyc -n tracking || true
+success "Host chrony configured (serving ${BRIDGE_SUBNET})."
+
+# ------------------------------------------------------------------------------
+# Step 11: Configure /etc/hosts on host and inside node1
+# ------------------------------------------------------------------------------
+step_header "11" "Configure /etc/hosts on host and inside node1"
 info "Updating host /etc/hosts with cluster node mappings..."
 for ENTRY in "${HOSTS_ENTRIES[@]}"; do
     IP=$(echo "$ENTRY" | awk '{print $1}')
@@ -529,13 +559,13 @@ done
 success "node1 /etc/hosts configuration complete."
 
 # ------------------------------------------------------------------------------
-# Step 11: Configure Golden Node (node1) with runtime & k8s packages
+# Step 12: Configure Golden Node (node1) with runtime & k8s packages
 # ------------------------------------------------------------------------------
-step_header "11" "Prepare Golden Node (node1) with OS updates, containerd, Kubernetes packages, and Longhorn prerequisites"
+step_header "12" "Prepare Golden Node (node1) with OS updates, containerd, chrony, Kubernetes packages, and Longhorn prerequisites"
 NODE="node1"
 info "--- Configuring runtime and Kubernetes binaries on $NODE ---"
 
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "KUBERNETES_VERSION='${KUBERNETES_VERSION}' bash -s" <<'EOF'
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "KUBERNETES_VERSION='${KUBERNETES_VERSION}' CHRONY_SERVER='${BRIDGE_IPV4}' bash -s" <<'EOF'
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
 
@@ -564,8 +594,8 @@ net.ipv4.ip_forward                 = 1
 SYSCTL_EOF
     sudo sysctl --system >/dev/null
 
-    echo "==> 5. Installing containerd.io and qemu-guest-agent..."
-    sudo apt-get install -y -qq ca-certificates curl gpg apt-transport-https jq qemu-guest-agent
+    echo "==> 5. Installing containerd.io, qemu-guest-agent, and chrony..."
+    sudo apt-get install -y -qq ca-certificates curl gpg apt-transport-https jq qemu-guest-agent chrony
     sudo systemctl enable --now qemu-guest-agent
     sudo install -m 0755 -d /etc/apt/keyrings
     sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
@@ -649,14 +679,34 @@ network:
 NETPLAN_EOF
     sudo chmod 600 /etc/netplan/50-cloud-init.yaml
     sudo netplan apply
+
+    echo "==> 11. Configuring chrony to sync from the host (${CHRONY_SERVER})..."
+    # Done on the golden node so every cloned node inherits it. The original config is kept once as chrony.conf.bak.
+    if [ ! -f /etc/chrony/chrony.conf.bak ]; then
+        sudo mv -f /etc/chrony/chrony.conf /etc/chrony/chrony.conf.bak
+    fi
+    sudo tee /etc/chrony/chrony.conf >/dev/null <<CHRONY_EOF
+# Chrony server
+server ${CHRONY_SERVER} iburst
+
+# This directive records the rate at which the system clock gains or loses time.
+driftfile /var/lib/chrony/chrony.drift
+
+# If the clock offset is larger than 1 second, step it rather than slew.
+makestep 1 3
+CHRONY_EOF
+    sudo systemctl enable chrony 2>/dev/null || true
+    sudo systemctl restart chrony
+    chronyc -n sources || true
+    chronyc -n tracking || true
 EOF
 success "Golden Node (node1) configured with runtime, packages, and pre-cached images."
 
 # ------------------------------------------------------------------------------
-# Step 12: Clone remaining nodes from node1 (Golden Image)
+# Step 13: Clone remaining nodes from node1 (Golden Image)
 # ------------------------------------------------------------------------------
 if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
-    step_header "12" "Clone remaining nodes (${CLONE_NODES[*]}) from node1"
+    step_header "13" "Clone remaining nodes (${CLONE_NODES[*]}) from node1"
 
     # i) Gracefully stop node1 and wait for it to stop
     info "Gracefully stopping node1 before cloning..."
@@ -748,15 +798,15 @@ if [ "${#CLONE_NODES[@]}" -gt 0 ]; then
         ssh-keyscan -H "${NODE_IPS[$NODE]}" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
     done
 else
-    step_header "12" "Single-node deployment (skipping cloning)"
+    step_header "13" "Single-node deployment (skipping cloning)"
     info "Only node1 is defined; skipping clone step."
 fi
 success "All nodes (${NODES[*]}) are cloned, started, and reachable via SSH."
 
 # ------------------------------------------------------------------------------
-# Step 13: Bootstrap node1 with kube-vip and kubeadm init
+# Step 14: Bootstrap node1 with kube-vip and kubeadm init
 # ------------------------------------------------------------------------------
-step_header "13" "Bootstrap control plane on node1"
+step_header "14" "Bootstrap control plane on node1"
 
 # Generate and configure kube-vip static pod manifest on node1
 info "Generating and configuring kube-vip static pod manifest on node1 (VIP: $VIP)..."
@@ -881,25 +931,25 @@ ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" '
 success "Node1 bootstrap and kube-vip configuration complete."
 
 # ------------------------------------------------------------------------------
-# Step 14: Copy k8s config file from node1 to host
+# Step 15: Copy k8s config file from node1 to host
 # ------------------------------------------------------------------------------
-step_header "14" "Copy k8s config from node1 to host"
+step_header "15" "Copy k8s config from node1 to host"
 mkdir -p "$HOME/.kube"
 scp "${SSH_OPTS[@]}" "${SSH_USER}@node1:/home/${SSH_USER}/.kube/config" "$HOME/.kube/config"
 chmod 600 "$HOME/.kube/config"
 success "Kubeconfig successfully copied to $HOME/.kube/config."
 
 # ------------------------------------------------------------------------------
-# Step 15: Validate join credentials for remaining control plane nodes
+# Step 16: Validate join credentials for remaining control plane nodes
 # ------------------------------------------------------------------------------
-step_header "15" "Validate join credentials for control plane nodes"
+step_header "16" "Validate join credentials for control plane nodes"
 info "Active join credentials verified for control plane VIP: ${VIP} (joining: ${CP_JOIN_NODES[*]})"
 success "Join credentials ready."
 
 # ------------------------------------------------------------------------------
-# Step 16: Join remaining control plane nodes to cluster
+# Step 17: Join remaining control plane nodes to cluster
 # ------------------------------------------------------------------------------
-step_header "16" "Join remaining control planes (${CP_JOIN_NODES[*]})"
+step_header "17" "Join remaining control planes (${CP_JOIN_NODES[*]})"
 for NODE in "${CP_JOIN_NODES[@]}"; do
     IP="${NODE_IPS[$NODE]}"
     info "Copying parameterized kubeadm-join-cp-config.yaml to $NODE (IP: $IP)..."
@@ -927,9 +977,9 @@ done
 success "All remaining control plane nodes (${CP_JOIN_NODES[*]}) joined successfully."
 
 # ------------------------------------------------------------------------------
-# Step 17: Distribute kube-vip.yaml to remaining control plane nodes
+# Step 18: Distribute kube-vip.yaml to remaining control plane nodes
 # ------------------------------------------------------------------------------
-step_header "17" "Distribute kube-vip.yaml to remaining control plane nodes (${CP_JOIN_NODES[*]})"
+step_header "18" "Distribute kube-vip.yaml to remaining control plane nodes (${CP_JOIN_NODES[*]})"
 TMP_KUBE_VIP=$(mktemp)
 ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "sudo cat /etc/kubernetes/manifests/kube-vip.yaml" > "$TMP_KUBE_VIP"
 
@@ -946,10 +996,10 @@ rm -f "$TMP_KUBE_VIP"
 success "Kube-vip manifests distributed to all control plane nodes."
 
 # ------------------------------------------------------------------------------
-# Step 18: Join worker nodes to cluster
+# Step 19: Join worker nodes to cluster
 # ------------------------------------------------------------------------------
 if [ "${#WORKER_NODES[@]}" -gt 0 ]; then
-    step_header "18" "Join worker nodes (${WORKER_NODES[*]}) to cluster"
+    step_header "19" "Join worker nodes (${WORKER_NODES[*]}) to cluster"
     for NODE in "${WORKER_NODES[@]}"; do
         IP="${NODE_IPS[$NODE]}"
         info "Copying parameterized kubeadm-join-worker-config.yaml to $NODE (IP: $IP)..."
@@ -972,12 +1022,12 @@ if [ "${#WORKER_NODES[@]}" -gt 0 ]; then
     done
     success "All worker nodes (${WORKER_NODES[*]}) joined successfully."
 else
-    step_header "18" "Join worker nodes to cluster"
+    step_header "19" "Join worker nodes to cluster"
     info "No worker nodes defined (NUM_WORKER=0). Skipping worker join."
 fi
 
 # ------------------------------------------------------------------------------
-# Step 19: Install the certificate check and renewal scripts on the control plane nodes
+# Step 20: Install the certificate check and renewal scripts on the control plane nodes
 # ------------------------------------------------------------------------------
 # certs/check_k8s_certs.sh and certs/renew_k8s_control_plane_certs.sh go to /usr/local/bin, the systemd service and timer
 # (check every 12 hours, renew when a control plane certificate expires within 60 days) to /etc/systemd/system.
@@ -988,7 +1038,7 @@ fi
 # certs/renew_k8s_control_plane_certs_from_host.sh (renews the certificates on all control plane nodes, then copies the new
 # kubeconfig to the host and the worker nodes) is also not installed: it is run by hand on the host.
 # Its FIRST_NODE, OTHER_CP_NODES and WORKER_NODES are set here the same way.
-step_header "19" "Install certificate check and renewal scripts on control plane nodes (${CP_NODES[*]})"
+step_header "20" "Install certificate check and renewal scripts on control plane nodes (${CP_NODES[*]})"
 CERTS_DIR="${SCRIPT_DIR}/certs"
 CERTS_FILES=(check_k8s_certs.sh renew_k8s_control_plane_certs.sh check_k8s_certs.service check_k8s_certs.timer)
 KUBELET_RENEW_SCRIPT="renew_k8s_kubelet_client_cert_from_host.sh"
@@ -1030,9 +1080,9 @@ done
 success "Certificate check timer enabled on all control plane nodes (${CP_NODES[*]})."
 
 # ------------------------------------------------------------------------------
-# Step 20: Install cilium CLI, helm, and kubectl on host
+# Step 21: Install cilium CLI, helm, and kubectl on host
 # ------------------------------------------------------------------------------
-step_header "20" "Install cilium CLI, Helm, Kubectl, and yq on host"
+step_header "21" "Install cilium CLI, Helm, Kubectl, and yq on host"
 
 # i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
@@ -1133,9 +1183,9 @@ fi
 success "Host tooling ready."
 
 # ------------------------------------------------------------------------------
-# Step 21: Remove control-plane taints from control plane nodes
+# Step 22: Remove control-plane taints from control plane nodes
 # ------------------------------------------------------------------------------
-step_header "21" "Remove control-plane taints from control plane nodes"
+step_header "22" "Remove control-plane taints from control plane nodes"
 info "Removing control-plane taints from control plane nodes (${CP_NODES[*]})..."
 for NODE in "${CP_NODES[@]}"; do
     info "Untainting control plane node $NODE..."
@@ -1144,9 +1194,9 @@ done
 success "Control-plane taints removed from ${CP_NODES[*]}."
 
 # ------------------------------------------------------------------------------
-# Step 22: Download Cilium Helm chart
+# Step 23: Download Cilium Helm chart
 # ------------------------------------------------------------------------------
-step_header "22" "Download Cilium ${CILIUM_VERSION} Helm chart"
+step_header "23" "Download Cilium ${CILIUM_VERSION} Helm chart"
 if [ -f "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" ]; then
     info "Cilium Helm chart already exists. Skipping download."
 else
@@ -1156,9 +1206,9 @@ else
 fi
 
 # ------------------------------------------------------------------------------
-# Step 23: Template Cilium Helm chart into cilium.yaml
+# Step 24: Template Cilium Helm chart into cilium.yaml
 # ------------------------------------------------------------------------------
-step_header "23" "Template Cilium Helm chart"
+step_header "24" "Template Cilium Helm chart"
 info "Rendering cilium.yaml from values..."
 helm template cilium "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" \
     --namespace kube-system \
@@ -1166,17 +1216,17 @@ helm template cilium "${SCRIPT_DIR}/cilium-${CILIUM_VERSION}.tgz" \
 success "cilium.yaml templated successfully."
 
 # ------------------------------------------------------------------------------
-# Step 24: Apply Cilium manifest
+# Step 25: Apply Cilium manifest
 # ------------------------------------------------------------------------------
-step_header "24" "Apply Cilium CNI"
+step_header "25" "Apply Cilium CNI"
 info "Applying cilium.yaml..."
 kubectl apply -f "${SCRIPT_DIR}/cilium.yaml"
 success "Cilium manifest applied."
 
 # ------------------------------------------------------------------------------
-# Step 25: Wait for Cilium deployment readiness
+# Step 26: Wait for Cilium deployment readiness
 # ------------------------------------------------------------------------------
-step_header "25" "Wait for Cilium readiness"
+step_header "26" "Wait for Cilium readiness"
 info "Waiting for Cilium daemonsets and deployments to become ready..."
 until cilium status --wait; do
     warn "Cilium status check timed out or not ready yet. Retrying in 5 seconds..."
@@ -1185,10 +1235,10 @@ done
 success "Cilium CNI is fully operational."
 
 # ------------------------------------------------------------------------------
-# Step 26: Install Longhorn (LONGHORN_VERSION / LONGHORN_PORT from inventory.txt)
+# Step 27: Install Longhorn (LONGHORN_VERSION / LONGHORN_PORT from inventory.txt)
 # ------------------------------------------------------------------------------
-# The node prerequisites (nfs-common, multipath off, kernel modules, iscsid) are done on the golden node in step 11.
-step_header "26" "Install Longhorn ${LONGHORN_VERSION}"
+# The node prerequisites (nfs-common, multipath off, kernel modules, iscsid) are done on the golden node in step 12.
+step_header "27" "Install Longhorn ${LONGHORN_VERSION}"
 if [[ ! "$LONGHORN_PORT" =~ ^[0-9]+$ ]] || [ "$LONGHORN_PORT" -lt 1 ] || [ "$LONGHORN_PORT" -gt 65535 ]; then
     error "Invalid LONGHORN_PORT='${LONGHORN_PORT}' in inventory.txt! It must be a port number (1-65535)."
     exit 1
@@ -1220,17 +1270,17 @@ kubectl apply -f "$LONGHORN_MANIFEST"
 success "Longhorn ${LONGHORN_VERSION} applied (UI at http://${VIP}:${LONGHORN_PORT}); its pods keep starting in the background."
 
 # ------------------------------------------------------------------------------
-# Step 27: Check all nodes are in Ready status
+# Step 28: Check all nodes are in Ready status
 # ------------------------------------------------------------------------------
-step_header "27" "Verify all cluster nodes are Ready"
+step_header "28" "Verify all cluster nodes are Ready"
 info "Waiting for all nodes to report condition Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=300s
 kubectl get nodes -o wide
 
 # ------------------------------------------------------------------------------
-# Step 28: Apply dnsutils test pod
+# Step 29: Apply dnsutils test pod
 # ------------------------------------------------------------------------------
-step_header "28" "Apply dnsutils test pod"
+step_header "29" "Apply dnsutils test pod"
 kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
