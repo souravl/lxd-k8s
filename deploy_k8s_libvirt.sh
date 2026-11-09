@@ -983,13 +983,17 @@ fi
 # (check every 12 hours, renew when a control plane certificate expires within 60 days) to /etc/systemd/system.
 # Only the control plane nodes get them; workers have no control plane certificates.
 # DEPLOY_USER in renew_k8s_control_plane_certs.sh is set to ${SSH_USER}: the script also replaces that user's ~/.kube/config.
-# certs/renew_k8s_kubelet_client_cert.sh (kubelet client certificate of a node) is not installed: it is run by hand on the host.
+# certs/renew_k8s_kubelet_client_cert_from_host.sh (kubelet client certificate of a node) is not installed: it is run by hand on the host.
 # Its FIRST_NODE is set here to node1 (in the repo copy of the script, so this changes the file on every run).
+# certs/renew_k8s_control_plane_certs_from_host.sh (renews the certificates on all control plane nodes, then copies the new
+# kubeconfig to the host and the worker nodes) is also not installed: it is run by hand on the host.
+# Its FIRST_NODE, OTHER_CP_NODES and WORKER_NODES are set here the same way.
 step_header "19" "Install certificate check and renewal scripts on control plane nodes (${CP_NODES[*]})"
 CERTS_DIR="${SCRIPT_DIR}/certs"
 CERTS_FILES=(check_k8s_certs.sh renew_k8s_control_plane_certs.sh check_k8s_certs.service check_k8s_certs.timer)
-KUBELET_RENEW_SCRIPT="renew_k8s_kubelet_client_cert.sh"
-for F in "${CERTS_FILES[@]}" "$KUBELET_RENEW_SCRIPT"; do
+KUBELET_RENEW_SCRIPT="renew_k8s_kubelet_client_cert_from_host.sh"
+CP_RENEW_HOST_SCRIPT="renew_k8s_control_plane_certs_from_host.sh"
+for F in "${CERTS_FILES[@]}" "$KUBELET_RENEW_SCRIPT" "$CP_RENEW_HOST_SCRIPT"; do
     if [ ! -f "${CERTS_DIR}/${F}" ]; then
         error "${CERTS_DIR}/${F} not found!"
         exit 1
@@ -998,6 +1002,13 @@ done
 
 info "Setting FIRST_NODE to node1 in ${CERTS_DIR}/${KUBELET_RENEW_SCRIPT}..."
 sed -i "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" "${CERTS_DIR}/${KUBELET_RENEW_SCRIPT}"
+
+info "Setting FIRST_NODE, OTHER_CP_NODES and WORKER_NODES in ${CERTS_DIR}/${CP_RENEW_HOST_SCRIPT}..."
+sed -i \
+    -e "s|^FIRST_NODE=.*|FIRST_NODE=\"node1\"|" \
+    -e "s|^OTHER_CP_NODES=.*|OTHER_CP_NODES=\"${CP_NODES[*]:1}\"|" \
+    -e "s|^WORKER_NODES=.*|WORKER_NODES=\"${WORKER_NODES[*]}\"|" \
+    "${CERTS_DIR}/${CP_RENEW_HOST_SCRIPT}"
 
 for NODE in "${CP_NODES[@]}"; do
     info "Installing the certificate check and renewal scripts on $NODE..."
