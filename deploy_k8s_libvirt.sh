@@ -846,7 +846,7 @@ for ((i=1; i<=NUM_CP; i++)); do
     CERT_SANS_BLOCK=$(printf "%s\n    - %s\n    - node%d" "$CERT_SANS_BLOCK" "${!var}" "$i")
 done
 
-# Copy parameterized kubeadm-init-config.yaml to node1
+# Copy the parameterized kubeadm init configuration (embedded below) to node1
 info "Copying parameterized kubeadm-init-config.yaml to node1..."
 # ${KUBERNETES_FULL_VERSION} is the full version of the kubeadm installed on node1 (for example v1.37.2). Setting it as
 # kubernetesVersion stops kubeadm from trying to look up the latest version on dl.k8s.io (it times out without internet).
@@ -856,12 +856,48 @@ if ! [[ "$KUBERNETES_FULL_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
     exit 1
 fi
 info "Kubernetes version for kubeadm init: ${KUBERNETES_FULL_VERSION}"
-INIT_CONFIG=$(< "${SCRIPT_DIR}/kubeadm-init-config.yaml")
-INIT_CONFIG="${INIT_CONFIG//\$\{NODE1_IP\}/$NODE1_IP}"
-INIT_CONFIG="${INIT_CONFIG//\$\{VIP\}/$VIP}"
-INIT_CONFIG="${INIT_CONFIG//\$\{KUBERNETES_FULL_VERSION\}/$KUBERNETES_FULL_VERSION}"
-INIT_CONFIG="${INIT_CONFIG//\$\{CERT_SANS\}/$CERT_SANS_BLOCK}"
-echo "$INIT_CONFIG" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "cat > ~/kubeadm-init-config.yaml"
+# The configuration is embedded here (quoted heredoc: the ${...} placeholders stay literal and are replaced below).
+# The standalone kubeadm-init-config.yaml (kept in backup/) is a reference copy and is not read by this script.
+KUBEADM_INIT_CONFIG=$(cat <<'KUBEADM_INIT_EOF'
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: ${NODE1_IP}
+  bindPort: 6443
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    - name: node-ip
+      value: ${NODE1_IP}
+timeouts:
+  controlPlaneComponentHealthCheck: 5m0s
+  kubeletHealthCheck: 4m0s
+  kubernetesAPICall: 5m0s
+  etcdAPICall: 3m0s
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: ${KUBERNETES_FULL_VERSION}
+apiServer:
+  certSANs:
+${CERT_SANS}
+networking:
+  podSubnet: 10.244.0.0/16
+  serviceSubnet: 10.96.0.0/16
+controlPlaneEndpoint: "${VIP}:6443"
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+conntrack:
+  maxPerCore: 0
+  min: 0
+KUBEADM_INIT_EOF
+)
+KUBEADM_INIT_CONFIG="${INIT_CONFIG//\$\{NODE1_IP\}/$NODE1_IP}"
+KUBEADM_INIT_CONFIG="${INIT_CONFIG//\$\{VIP\}/$VIP}"
+KUBEADM_INIT_CONFIG="${INIT_CONFIG//\$\{KUBERNETES_FULL_VERSION\}/$KUBERNETES_FULL_VERSION}"
+KUBEADM_INIT_CONFIG="${INIT_CONFIG//\$\{CERT_SANS\}/$CERT_SANS_BLOCK}"
+echo "$KUBEADM_INIT_CONFIG" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@node1" "cat > ~/kubeadm-init-config.yaml"
 
 # Run kubeadm init (with idempotency guard)
 info "Executing kubeadm init on node1..."
@@ -950,6 +986,35 @@ success "Join credentials ready."
 # Step 17: Join remaining control plane nodes to cluster
 # ------------------------------------------------------------------------------
 step_header "17" "Join remaining control planes (${CP_JOIN_NODES[*]})"
+# The configuration is embedded here (quoted heredoc: the ${...} placeholders stay literal and are replaced by sed per node).
+# The standalone kubeadm-join-cp-config.yaml (kept in backup/) is a reference copy and is not read by this script.
+KUBEADM_JOIN_CP_CONFIG=$(cat <<'KUBEADM_JOIN_CP_EOF'
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    - name: node-ip
+      value: ${NODE_IP}
+discovery:
+  bootstrapToken:
+    token: "${JOIN_TOKEN}"
+    apiServerEndpoint: "${VIP}:6443"
+    caCertHashes: ["sha256:${CA_CERT_HASH}"]
+controlPlane:
+  localAPIEndpoint:
+    advertiseAddress: ${NODE_IP}
+    bindPort: 6443
+  certificateKey: "${CERT_KEY}"
+timeouts:
+  controlPlaneComponentHealthCheck: 5m0s
+  kubeletHealthCheck: 4m0s
+  kubernetesAPICall: 5m0s
+  etcdAPICall: 3m0s
+  tlsBootstrap: 5m0s
+  discovery: 5m0s
+KUBEADM_JOIN_CP_EOF
+)
 for NODE in "${CP_JOIN_NODES[@]}"; do
     IP="${NODE_IPS[$NODE]}"
     info "Copying parameterized kubeadm-join-cp-config.yaml to $NODE (IP: $IP)..."
@@ -959,7 +1024,7 @@ for NODE in "${CP_JOIN_NODES[@]}"; do
         -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
         -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
         -e "s|\${CERT_KEY}|${CERT_KEY}|g" \
-        "${SCRIPT_DIR}/kubeadm-join-cp-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "cat > ~/kubeadm-join-cp-config.yaml"
+        <<<"$KUBEADM_JOIN_CP_CONFIG" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "cat > ~/kubeadm-join-cp-config.yaml"
 
     info "Executing kubeadm join on $NODE..."
     ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '
@@ -1000,6 +1065,28 @@ success "Kube-vip manifests distributed to all control plane nodes."
 # ------------------------------------------------------------------------------
 if [ "${#WORKER_NODES[@]}" -gt 0 ]; then
     step_header "19" "Join worker nodes (${WORKER_NODES[*]}) to cluster"
+    # The configuration is embedded here (quoted heredoc: the ${...} placeholders stay literal and are replaced by sed per node).
+    # The standalone kubeadm-join-worker-config.yaml (kept in backup/) is a reference copy and is not read by this script.
+    KUBEADM_JOIN_WORKER_CONFIG=$(cat <<'KUBEADM_JOIN_WORKER_EOF'
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: JoinConfiguration
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    - name: node-ip
+      value: ${NODE_IP}
+discovery:
+  bootstrapToken:
+    token: "${JOIN_TOKEN}"
+    apiServerEndpoint: "${VIP}:6443"
+    caCertHashes: ["sha256:${CA_CERT_HASH}"]
+timeouts:
+  kubeletHealthCheck: 4m0s
+  kubernetesAPICall: 5m0s
+  tlsBootstrap: 5m0s
+  discovery: 5m0s
+KUBEADM_JOIN_WORKER_EOF
+)
     for NODE in "${WORKER_NODES[@]}"; do
         IP="${NODE_IPS[$NODE]}"
         info "Copying parameterized kubeadm-join-worker-config.yaml to $NODE (IP: $IP)..."
@@ -1008,7 +1095,7 @@ if [ "${#WORKER_NODES[@]}" -gt 0 ]; then
             -e "s|\${VIP}|${VIP}|g" \
             -e "s|\${JOIN_TOKEN}|${JOIN_TOKEN}|g" \
             -e "s|\${CA_CERT_HASH}|${CA_CERT_HASH}|g" \
-            "${SCRIPT_DIR}/kubeadm-join-worker-config.yaml" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "cat > ~/kubeadm-join-worker-config.yaml"
+            <<<"$KUBEADM_JOIN_WORKER_CONFIG" | ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "cat > ~/kubeadm-join-worker-config.yaml"
 
         info "Executing kubeadm join on $NODE..."
         ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" '

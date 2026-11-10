@@ -18,9 +18,9 @@ Initial inspiration for this project came from [justmeandopensource/kubernetes (
   - **libvirt (KVM Virtual Machines)**: Full hardware virtualization with cloud images, cloud-init, and deterministic DHCP MAC reservations via `./deploy_k8s_libvirt.sh`.
 - **High Availability & Scalable Topology**: Configurable multi-control-plane (`NUM_CP >= 3`) and optional dedicated worker (`NUM_WORKER`) topology with `kube-vip` virtual IP failover (`10.67.38.250`).
 - **Dynamic SANs & Host Key Isolation**:
-  - Automatically generates dynamic `certSANs` in `kubeadm-init-config.yaml` for all control plane nodes.
+  - Automatically generates dynamic `certSANs` in the kubeadm init configuration (embedded in the deployment script) for all control plane nodes.
   - Automatically regenerates unique SSH host keys (`ssh-keygen -A`) on all cloned nodes to prevent host key collisions.
-  - Sets `kubernetesVersion` in `kubeadm-init-config.yaml` (step 13; step 14 in `deploy_k8s_libvirt.sh`) to the full version of the kubeadm installed on node1 (`kubeadm version -o short`, for example `v1.37.2`), so kubeadm does not look up the latest version on `dl.k8s.io` (it times out without internet).
+  - Sets `kubernetesVersion` in the embedded kubeadm init configuration (step 13; step 14 in `deploy_k8s_libvirt.sh`) to the full version of the kubeadm installed on node1 (`kubeadm version -o short`, for example `v1.37.2`), so kubeadm does not look up the latest version on `dl.k8s.io` (it times out without internet).
 - **Certificate Check & Renewal**: Step 19 (step 20 in `deploy_k8s_libvirt.sh`) installs `check_k8s_certs.sh` and `renew_k8s_control_plane_certs.sh` to `/usr/local/bin` and a systemd service and timer (check every 12 hours, renew when a control plane certificate expires within 60 days) on every control plane node.
 - **Modern Networking & CNI**: Cilium eBPF CNI with Hubble network observability.
 - **Time sync (chrony, libvirt only)**: `deploy_k8s_libvirt.sh` installs `chrony` on the host (step 1) and configures it as a time server for the bridge subnet that uses the host's own clock (step 10). It is also installed on the golden node, where it is configured to sync from `BRIDGE_IPV4` (the host address on `virbr0`; step 12, inherited by every clone). `deploy_k8s.sh` does not set up chrony: containers use the host clock.
@@ -106,9 +106,9 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | `steps_libvirt.txt` | Step-by-step manual guide for libvirt (KVM Virtual Machines) |
 | `container-engine-init-config.yaml` | Parameterized container engine preseed configuration (Incus/LXD) |
 | `k8s-container-profile-config.yaml` | Parameterized container profile for Kubernetes (Incus/LXD) |
-| `kubeadm-init-config.yaml` | Parameterized kubeadm init configuration with dynamic `certSANs` and `kubernetesVersion` (`${KUBERNETES_FULL_VERSION}`, the kubeadm version installed on node1) for bootstrap control plane |
-| `kubeadm-join-cp-config.yaml` | Parameterized kubeadm join configuration for secondary control planes |
-| `kubeadm-join-worker-config.yaml` | Parameterized kubeadm join configuration for worker nodes |
+| `backup/kubeadm-init-config.yaml` | Reference copy of the parameterized kubeadm init configuration with dynamic `certSANs` and `kubernetesVersion` (`${KUBERNETES_FULL_VERSION}`, the kubeadm version installed on node1) for bootstrap control plane. The deployment scripts do not read this file: the same content is embedded in them (`KUBEADM_INIT_CONFIG`), so change it in both places |
+| `backup/kubeadm-join-cp-config.yaml` | Reference copy of the parameterized kubeadm join configuration for secondary control planes; not read by the deployment scripts, which embed the same content (`KUBEADM_JOIN_CP_CONFIG`) |
+| `backup/kubeadm-join-worker-config.yaml` | Reference copy of the parameterized kubeadm join configuration for worker nodes; not read by the deployment scripts, which embed the same content (`KUBEADM_JOIN_WORKER_CONFIG`) |
 | `cilium-deploy.yaml` | Helm values configuration for Cilium CNI installation |
 | `dnsutils.yaml` | DNS verification testing pod manifest |
 | `certs/check_k8s_certs.sh`, `certs/renew_k8s_control_plane_certs.sh` | Control plane certificate check and renewal scripts; step 19 (step 20 in `deploy_k8s_libvirt.sh`) installs them to `/usr/local/bin` on every control plane node (not on workers) and sets `DEPLOY_USER` in the renewal script to the login user. The check script skips the renewal unless a control plane certificate expires within 60 days; the renewal script exits on a node without `/etc/kubernetes/manifests/kube-apiserver.yaml` |

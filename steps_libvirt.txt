@@ -304,7 +304,8 @@ EOF
          ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
 14. For node1 (Bootstrap Control Plane):
-    i)    Copy parameterized kubeadm-init-config.yaml to node1:
+    i)    Copy parameterized kubeadm-init-config.yaml to node1
+          (the deployment scripts embed this configuration instead of reading the file; the file in backup/ is a reference copy):
           Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), ${KUBERNETES_FULL_VERSION}
           (the full version of the kubeadm installed on node1, from 'kubeadm version -o short', for example v1.37.2;
            it is set as kubernetesVersion so kubeadm does not look up the latest version on dl.k8s.io), and ${CERT_SANS}
@@ -354,6 +355,7 @@ EOF
     (Allows managing the cluster with kubectl directly from the host machine).
 
 16. Update join configuration files on host:
+    (The deployment scripts embed both join configurations instead of reading the files; the files in backup/ are reference copies.)
     - Update kubeadm-join-cp-config.yaml with the values noted in step 14.v (${JOIN_TOKEN}, ${CA_CERT_HASH}, ${CERT_KEY}, ${VIP}, and target ${NODE_IP}).
     - Update kubeadm-join-worker-config.yaml with ${JOIN_TOKEN}, ${CA_CERT_HASH}, ${VIP}, and target ${NODE_IP}.
 
