@@ -335,15 +335,60 @@ sudo sysctl --system
 # ------------------------------------------------------------------------------
 # Step 6: Initialize container engine with preseed configuration
 # ------------------------------------------------------------------------------
-step_header "6" "Initialize ${ENGINE_NAME} with container-engine-init-config.yaml"
+step_header "6" "Initialize ${ENGINE_NAME} with the preseed configuration"
 if ! $CONTAINER_CMD network show "$BRIDGE" >/dev/null 2>&1; then
-    info "Applying parameterized container-engine-init-config.yaml preseed..."
+    info "Applying parameterized container engine init (preseed) configuration..."
+    # The configuration is embedded here (quoted heredoc: the ${...} placeholders stay literal and are replaced by sed).
+    # The standalone container-engine-init-config.yaml (kept in backup/) is a reference copy and is not read by this script.
+    CONTAINER_ENGINE_INIT_CONFIG=$(cat <<'CONTAINER_ENGINE_INIT_EOF'
+config: {}
+networks:
+- config:
+    ipv4.address: ${BRIDGE_IPV4}/24
+    ipv4.nat: "true"
+    ipv6.address: ${BRIDGE_IPV6}/64
+    ipv6.nat: "true"
+  description: ""
+  name: ${BRIDGE}
+  type: bridge
+  project: default
+storage_pools:
+- config:
+    source: ${STORAGE_POOL_DIR}
+  description: ""
+  name: default
+  driver: dir
+profiles:
+- config: {}
+  description: Default profile
+  devices:
+    eth0:
+      name: eth0
+      network: ${BRIDGE}
+      type: nic
+    root:
+      path: /
+      pool: default
+      type: disk
+  name: default
+projects:
+- config:
+    features.images: "true"
+    features.networks: "true"
+    features.networks.zones: "true"
+    features.profiles: "true"
+    features.storage.buckets: "true"
+    features.storage.volumes: "true"
+  description: Default project
+  name: default
+CONTAINER_ENGINE_INIT_EOF
+)
     sed \
         -e "s|\${BRIDGE}|${BRIDGE}|g" \
         -e "s|\${STORAGE_POOL_DIR}|${STORAGE_POOL_DIR}|g" \
         -e "s|\${BRIDGE_IPV4}|${BRIDGE_IPV4}|g" \
         -e "s|\${BRIDGE_IPV6}|${BRIDGE_IPV6}|g" \
-        "${SCRIPT_DIR}/container-engine-init-config.yaml" | $INIT_CMD --preseed
+        <<<"$CONTAINER_ENGINE_INIT_CONFIG" | $INIT_CMD --preseed
 else
     info "${ENGINE_NAME} bridge '${BRIDGE}' already exists. Skipping preseed."
 fi
@@ -388,12 +433,41 @@ if ! $CONTAINER_CMD profile list | grep -qw "k8s"; then
     info "Creating profile 'k8s'..."
     $CONTAINER_CMD profile create k8s
 fi
-info "Applying parameterized k8s-container-profile-config.yaml to profile 'k8s'..."
+info "Applying parameterized Kubernetes container profile configuration to profile 'k8s'..."
+# The configuration is embedded here (quoted heredoc: the ${...} placeholders stay literal and are replaced by sed).
+# The standalone k8s-container-profile-config.yaml (kept in backup/) is a reference copy and is not read by this script.
+K8S_CONTAINER_PROFILE_CONFIG=$(cat <<'K8S_CONTAINER_PROFILE_EOF'
+config:
+  limits.cpu: "${LIMITS_CPU}"
+  limits.memory: ${LIMITS_MEMORY}
+  limits.memory.swap: "false"
+  linux.kernel_modules: ip_tables,ip6_tables,nf_nat,overlay,br_netfilter
+  raw.lxc: "lxc.apparmor.profile=unconfined\nlxc.cap.drop= \nlxc.cgroup.devices.allow=a\nlxc.mount.auto=proc:rw sys:rw"
+  security.nesting: "true"
+  security.privileged: "true"
+description: Profile for Kubernetes
+devices:
+  eth0:
+    name: eth0
+    nictype: bridged
+    parent: ${BRIDGE}
+    type: nic
+  kmsg:
+    path: /dev/kmsg
+    source: /dev/kmsg
+    type: unix-char
+  root:
+    path: /
+    pool: default
+    type: disk
+name: k8s
+K8S_CONTAINER_PROFILE_EOF
+)
 sed \
     -e "s|\${BRIDGE}|${BRIDGE}|g" \
     -e "s|\${LIMITS_CPU}|${LIMITS_CPU}|g" \
     -e "s|\${LIMITS_MEMORY}|${LIMITS_MEMORY}|g" \
-    "${SCRIPT_DIR}/k8s-container-profile-config.yaml" | $CONTAINER_CMD profile edit k8s
+    <<<"$K8S_CONTAINER_PROFILE_CONFIG" | $CONTAINER_CMD profile edit k8s
 
 # ------------------------------------------------------------------------------
 # Step 9: Launch container node1

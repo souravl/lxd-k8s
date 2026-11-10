@@ -51,12 +51,12 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 - **[`steps.txt`](steps.txt)**: Unified step-by-step manual reference for Incus and LXD system containers.
 - **[`steps_libvirt.txt`](steps_libvirt.txt)**: Step-by-step manual reference for libvirt KVM virtual machines.
 - **Unified Parameterized Configurations**:
-  - `container-engine-init-config.yaml`: Preseed initialization config parameterizing bridge and storage pool directory.
-  - `k8s-container-profile-config.yaml`: Profile configuration parameterizing bridge, CPU, and memory limits.
+  - `backup/container-engine-init-config.yaml`: Reference copy of the preseed initialization config parameterizing bridge and storage pool directory.
+  - `backup/k8s-container-profile-config.yaml`: Reference copy of the profile configuration parameterizing bridge, CPU, and memory limits.
   - `backup/kubeadm-init-config.yaml`: Reference copy of the parameterized bootstrap control plane init configuration with dynamic `certSANs`, `kubernetesVersion` (`${KUBERNETES_FULL_VERSION}`, the kubeadm version installed on node1) and VIP endpoints.
   - `backup/kubeadm-join-cp-config.yaml`: Reference copy of the parameterized control-plane join configuration.
   - `backup/kubeadm-join-worker-config.yaml`: Reference copy of the parameterized worker-node join configuration.
-  - The deployment scripts do not read these three files: they embed the same content as quoted heredocs (`KUBEADM_INIT_CONFIG`, `KUBEADM_JOIN_CP_CONFIG`, `KUBEADM_JOIN_WORKER_CONFIG`), so a change must be made in both places.
+  - The deployment scripts do not read the `backup/` files: they embed the same content as quoted heredocs (`KUBEADM_INIT_CONFIG`, `KUBEADM_JOIN_CP_CONFIG`, `KUBEADM_JOIN_WORKER_CONFIG`; `deploy_k8s.sh` also `CONTAINER_ENGINE_INIT_CONFIG`, `K8S_CONTAINER_PROFILE_CONFIG`), so a change must be made in both places.
   - `cilium-deploy.yaml`: Helm values configuration for Cilium CNI installation.
   - `dnsutils.yaml`: DNS testing pod manifest for cluster verification.
   - `certs/`: `check_k8s_certs.sh`, `renew_k8s_control_plane_certs.sh`, `check_k8s_certs.service` and `check_k8s_certs.timer` (installed on the control plane nodes in step 19; step 20 in `deploy_k8s_libvirt.sh`), `renew_k8s_kubelet_client_cert_from_host.sh` and `renew_k8s_control_plane_certs_from_host.sh` (run by hand on the host).
@@ -87,7 +87,7 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | **3** | UFW disable | Disables `ufw` on host if installed. | Disables `ufw` on host if installed. |
 | **4** | Kernel modules | Loads `overlay`, `br_netfilter`, `nf_conntrack` on host. | Loads host acceleration module `vhost_net` on host. |
 | **5** | Sysctl config | Enables bridge netfilter and `ip_forward=1` on host. | Enables `ip_forward=1` on host. |
-| **6** | Network initialization | Preseeds `container-engine-init-config.yaml` (`incusbr0` / `lxdbr0`). | Updates libvirt `default` network (`virbr0`) gateway and DHCP range. |
+| **6** | Network initialization | Preseeds the embedded container engine init configuration (`incusbr0` / `lxdbr0`). | Updates libvirt `default` network (`virbr0`) gateway and DHCP range. |
 | **7** | Docker coexistence | Applies forward and masquerade rules to `DOCKER-USER` chain. | Applies forward and masquerade rules for `virbr0` to `DOCKER-USER`. |
 | **8** | Profile / Base Image | Configures `k8s` profile with CPU and memory limits. | Downloads and caches Ubuntu Server cloud image (`.qcow2`). |
 | **9** | Launch node1 | Launches container `node1` with static IP and profile `k8s`. | Provisions disk, cloud-init user-data (user `$USER` with passwordless sudo and the host's SSH public key; `~/.ssh/id_ed25519.pub` or `id_rsa.pub`; the script generates `~/.ssh/id_ed25519` if no key pair exists, and stops with the `ssh-keygen -y` command to run if a private key exists without its `.pub` file), and runs `virt-install`. |
