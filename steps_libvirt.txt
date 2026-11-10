@@ -304,7 +304,7 @@ EOF
          ssh-keyscan -H node1 node2 node3 >> ~/.ssh/known_hosts
 
 14. For node1 (Bootstrap Control Plane):
-    i)    Copy parameterized kubeadm-init-config.yaml to node1
+    i)    Copy parameterized kubeadm-init-config.yaml (from backup/kubeadm-init-config.yaml) to node1
           (the deployment scripts embed this configuration instead of reading the file; backup/kubeadm-init-config.yaml is a reference copy):
           Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), ${KUBERNETES_FULL_VERSION}
           (the full version of the kubeadm installed on node1, from 'kubeadm version -o short', for example v1.37.2;
