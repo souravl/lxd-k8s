@@ -305,11 +305,12 @@ EOF
 
 14. For node1 (Bootstrap Control Plane):
     i)    Copy parameterized kubeadm-init-config.yaml to node1
-          (the deployment scripts embed this configuration instead of reading the file; the file in backup/ is a reference copy):
+          (the deployment scripts embed this configuration instead of reading the file; backup/kubeadm-init-config.yaml is a reference copy):
           Substitute ${NODE1_IP} (10.67.38.10), ${VIP} (10.67.38.250), ${KUBERNETES_FULL_VERSION}
           (the full version of the kubeadm installed on node1, from 'kubeadm version -o short', for example v1.37.2;
            it is set as kubernetesVersion so kubeadm does not look up the latest version on dl.k8s.io), and ${CERT_SANS}
           (a YAML list including 127.0.0.1, localhost, 10.67.38.250, and each control plane's IP and hostname).
+          (Do the substitutions in a copy of backup/kubeadm-init-config.yaml, then copy that file:)
           scp kubeadm-init-config.yaml node1:~/kubeadm-init-config.yaml
     ii)   Generate kube-vip static pod manifest on node1 in /tmp/kube-vip.yaml:
           INTERFACE=$(ip -4 route show default | awk '{print $5}' | head -n1)    # e.g. enp1s0
@@ -355,13 +356,14 @@ EOF
     (Allows managing the cluster with kubectl directly from the host machine).
 
 16. Update join configuration files on host:
-    (The deployment scripts embed both join configurations instead of reading the files; the files in backup/ are reference copies.)
-    - Update kubeadm-join-cp-config.yaml with the values noted in step 14.v (${JOIN_TOKEN}, ${CA_CERT_HASH}, ${CERT_KEY}, ${VIP}, and target ${NODE_IP}).
-    - Update kubeadm-join-worker-config.yaml with ${JOIN_TOKEN}, ${CA_CERT_HASH}, ${VIP}, and target ${NODE_IP}.
+    (The deployment scripts embed both join configurations instead of reading the files; backup/kubeadm-join-cp-config.yaml and
+     backup/kubeadm-join-worker-config.yaml are reference copies. Do the updates in copies of them.)
+    - Update a copy of backup/kubeadm-join-cp-config.yaml (kubeadm-join-cp-config.yaml) with the values noted in step 14.v (${JOIN_TOKEN}, ${CA_CERT_HASH}, ${CERT_KEY}, ${VIP}, and target ${NODE_IP}).
+    - Update a copy of backup/kubeadm-join-worker-config.yaml (kubeadm-join-worker-config.yaml) with ${JOIN_TOKEN}, ${CA_CERT_HASH}, ${VIP}, and target ${NODE_IP}.
 
 17. For remaining control plane nodes (node2 .. node${NUM_CP}) - Join Control Plane:
     For each remaining control plane node:
-      i)   SCP parameterized kubeadm-join-cp-config.yaml to the node.
+      i)   SCP the parameterized kubeadm-join-cp-config.yaml (from step 16 above) to the node.
       ii)  Run:
            sudo kubeadm join --config ./kubeadm-join-cp-config.yaml
       iii) Copy /etc/kubernetes/admin.conf to $HOME/.kube/config and set ownership:
@@ -376,7 +378,7 @@ EOF
 
 19. For worker nodes (Join Worker Nodes) (if NUM_WORKER > 0):
     For each worker node (node${NUM_CP+1} .. node${TOTAL_NODES}):
-      i)   SCP parameterized kubeadm-join-worker-config.yaml to the worker node.
+      i)   SCP the parameterized kubeadm-join-worker-config.yaml (from step 16 above) to the worker node.
       ii)  Run:
            sudo kubeadm join --config ./kubeadm-join-worker-config.yaml
       iii) Exit out of node back to host machine.
