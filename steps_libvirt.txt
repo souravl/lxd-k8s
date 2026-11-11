@@ -410,7 +410,7 @@ EOF
      ~/.kube/config to ~/.kube/config of the ssh user and of root on every worker node.)
 
 21. Install host tools:
-    On the host machine, install Cilium CLI, Helm, Kubectl, and yq (each is skipped if already installed):
+    On the host machine, install Cilium CLI, Helm, Kubectl, yq, chartmuseum, and containerd with nerdctl and the CNI plugins (each is skipped if already installed):
     i)   Install Cilium CLI:
          CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
          CLI_ARCH=amd64; if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
@@ -440,6 +440,39 @@ EOF
          sha256sum /tmp/${YQ_BIN}    # must match the value printed above
          sudo install -m 0755 /tmp/${YQ_BIN} /usr/local/bin/yq
          rm -f /tmp/${YQ_BIN} /tmp/yq_checksums /tmp/yq_checksums_hashes_order
+    v)   Install chartmuseum (helm/chartmuseum, latest release, SHA-256 verified; skipped if /usr/local/bin/chartmuseum exists):
+         CM_ARCH=amd64; if [ "$(uname -m)" = "aarch64" ]; then CM_ARCH=arm64; fi
+         CM_TAG=$(curl -fsSL https://api.github.com/repos/helm/chartmuseum/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+         CM_DIST="chartmuseum-${CM_TAG}-linux-${CM_ARCH}.tar.gz"
+         curl -L --fail "https://get.helm.sh/${CM_DIST}" -o /tmp/${CM_DIST}
+         curl -L --fail -s "https://get.helm.sh/${CM_DIST}.sha256sum" -o /tmp/${CM_DIST}.sha256sum
+         awk '{print $1}' /tmp/${CM_DIST}.sha256sum
+         sha256sum /tmp/${CM_DIST}    # must match the value printed above
+         tar -xzf /tmp/${CM_DIST} -C /tmp
+         sudo install -m 0755 /tmp/linux-${CM_ARCH}/chartmuseum /usr/local/bin/chartmuseum
+         rm -rf /tmp/${CM_DIST} /tmp/${CM_DIST}.sha256sum /tmp/linux-${CM_ARCH}
+    vi)  Install containerd, nerdctl, and the CNI plugins (same runtime setup as the golden node in step 12, without the Kubernetes-only parts:
+         no pause image setting, no kubeadm image pre-pull, no kubelet / kubeadm / cri-tools, so Kubernetes can be added to the host later;
+         each part is skipped if it is already in place, and existing files are kept unchanged):
+         a) Kernel modules and sysctl settings (host steps 4 and 5 only cover vhost_net and ip_forward; the files are written only if missing):
+              /etc/modules-load.d/k8s.conf: overlay, br_netfilter        sudo modprobe overlay; sudo modprobe br_netfilter
+              /etc/sysctl.d/99-k8s.conf: net.bridge.bridge-nf-call-iptables = 1, net.bridge.bridge-nf-call-ip6tables = 1, net.ipv4.ip_forward = 1
+              sudo sysctl --system
+         b) containerd.io (skip if the package is installed); the Docker apt repository is added the same way as in step 12 v:
+              sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+              (write /etc/apt/sources.list.d/docker.sources for the host's Ubuntu codename and architecture)
+              sudo apt-get update -qq && sudo apt-get install -y containerd.io
+         c) containerd config (skip if /etc/containerd/config.toml already has SystemdCgroup = true and disabled_plugins = []; an existing file is kept once as config.toml.bak):
+              containerd config default | sudo tee /etc/containerd/config.toml
+              sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+              sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
+         d) nerdctl (latest release, minimal build, SHA-256 verified, installed to /usr/local/bin/nerdctl; skipped if that file exists;
+            the tag is taken from the redirect of https://github.com/containerd/nerdctl/releases/latest, the archive and SHA256SUMS come from the release download URL),
+            and /etc/nerdctl/nerdctl.toml with namespace = "k8s.io" (written only if missing).
+         e) CNI plugins from the Kubernetes apt repository (skip if kubernetes-cni is installed; the repo is added as in step 12 ix if /etc/apt/sources.list.d/kubernetes.list is missing):
+              sudo apt-get update -qq && sudo apt-get install -y kubernetes-cni      (installs to /opt/cni/bin)
+         f) Reload systemd and enable containerd; restart it if the config changed in the containerd config part, otherwise just start it:
+              sudo systemctl daemon-reload && sudo systemctl enable containerd && sudo systemctl restart containerd
 
 22. Remove control-plane taints from control plane nodes:
     Run on host for each control plane node (node1 .. node${NUM_CP}):
@@ -485,3 +518,36 @@ EOF
     kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
     kubectl get pods -A
     Verify cluster networking and DNS resolution.
+
+30. Install chartmuseum.service (local Helm chart repository on the host; HELM_REPO_SERVER_PORT and CHARTS_DIR come from
+    inventory.txt: a port number (default 9000), and an absolute directory that ends with '/' (default: <script directory>/charts/);
+    the script checks them at its start):
+    i)   Create the charts directory (as the login user, so it is not owned by root):
+         mkdir -p ${CHARTS_DIR}
+    ii)  Write the unit file (overwriting an existing one; the two variables are replaced by their values):
+         sudo tee /etc/systemd/system/chartmuseum.service <<EOF
+[Unit]
+Description=Chartmuseum for serving Helm charts locally
+After=kubelet.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/chartmuseum --debug --port=${HELM_REPO_SERVER_PORT} --storage=local --storage-local-rootdir=${CHARTS_DIR}
+TimeoutStartSec=600
+LogLevelMax=notice
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    iii) Enable and (re)start it (the script uses 'restart', so a re-run with a changed port or directory takes effect):
+         sudo systemctl daemon-reload
+         sudo systemctl enable chartmuseum.service
+         sudo systemctl restart chartmuseum.service
+    iv)  Wait until it answers (the script waits up to 30 seconds and stops with an error otherwise):
+         curl http://127.0.0.1:${HELM_REPO_SERVER_PORT}/health
+
+31. Set up the local Helm repo (served by chartmuseum from step 30; HOST_IP is set in inventory.txt, empty = BRIDGE_IPV4):
+    helm repo remove local || true
+    helm repo add local http://${HOST_IP}:${HELM_REPO_SERVER_PORT}
+    helm repo update
+    helm repo list

@@ -25,9 +25,9 @@ Initial inspiration for this project came from [justmeandopensource/kubernetes (
 - **Modern Networking & CNI**: Cilium eBPF CNI with Hubble network observability.
 - **Time sync (chrony, libvirt only)**: `deploy_k8s_libvirt.sh` installs `chrony` on the host (step 1) and configures it as a time server for the bridge subnet that uses the host's own clock (step 10). It is also installed on the golden node, where it is configured to sync from `BRIDGE_IPV4` (the host address on `virbr0`; step 12, inherited by every clone). `deploy_k8s.sh` does not set up chrony: containers use the host clock.
 - **Persistent Storage (Longhorn, libvirt only)**: Step 27 of `deploy_k8s_libvirt.sh` installs Longhorn `${LONGHORN_VERSION}` from its upstream manifest (saved as `longhorn-<version>.yaml`) after patching it: the `longhorn-frontend` service gets `${VIP}` as externalIP and port `${LONGHORN_PORT}` (UI at `http://${VIP}:${LONGHORN_PORT}`), and `guaranteed-instance-manager-cpu: 0` is added to the default settings. The node prerequisites (`nfs-common`, multipath off, `dm_crypt` / `iscsi_tcp` / `nfs` modules, `iscsid`) are installed on the golden node in step 12. `deploy_k8s.sh` does not install Longhorn.
-- **Configurable Inventory**: Centralized configuration in `inventory.txt` (Node static IPs, resource sizing for CPU/RAM/Disk, Ubuntu release, Kubernetes, Cilium, and for libvirt the Longhorn version and UI port: `LONGHORN_VERSION` / `LONGHORN_PORT`).
+- **Configurable Inventory**: Centralized configuration in `inventory.txt` (Node static IPs, resource sizing for CPU/RAM/Disk, Ubuntu release, Kubernetes, Cilium, for libvirt the Longhorn version and UI port: `LONGHORN_VERSION` / `LONGHORN_PORT`, and the local Helm repo: `HOST_IP`, `HELM_REPO_SERVER_PORT`, `CHARTS_DIR`).
 - **Firewall Coexistence**: Idempotent iptables rules allowing Docker and container/VM bridges (`incusbr0`, `lxdbr0`, or `virbr0`) to coexist seamlessly.
-- **Self-Contained Deployment**: Master deployment scripts (`deploy_k8s.sh` and `deploy_k8s_libvirt.sh`) contain all orchestration, node provisioning, runtime installation, node cloning, host tooling (Cilium CLI, Helm, kubectl; `deploy_k8s_libvirt.sh` also installs `yq` and `chrony`), and firewall configuration inline. The only files they read besides `inventory.txt` are the YAML manifests and the `certs/` scripts listed below.
+- **Self-Contained Deployment**: Master deployment scripts (`deploy_k8s.sh` and `deploy_k8s_libvirt.sh`) contain all orchestration, node provisioning, runtime installation, node cloning, host tooling (Cilium CLI, Helm, kubectl, `chartmuseum`, `containerd` with `nerdctl` and the CNI plugins; `deploy_k8s_libvirt.sh` also installs `yq` and `chrony`), and firewall configuration inline. The only files they read besides `inventory.txt` are the YAML manifests and the `certs/` scripts listed below.
 
 ---
 
@@ -74,6 +74,15 @@ CILIUM_VERSION="1.20.2"
 # so the UI is reachable at http://${VIP}:${LONGHORN_PORT}.
 LONGHORN_VERSION="v1.13.0"
 LONGHORN_PORT="9080"
+
+# Local Helm chart repository (host; deploy_k8s.sh steps 28 and 29, deploy_k8s_libvirt.sh steps 30 and 31): chartmuseum.service
+# serves the charts in CHARTS_DIR on HELM_REPO_SERVER_PORT, and the Helm repo 'local' is added at
+# http://${HOST_IP}:${HELM_REPO_SERVER_PORT}.
+# HOST_IP: address of this host; empty = BRIDGE_IPV4 (the host address on the bridge).
+# CHARTS_DIR: absolute path that must end with '/'; created if missing; empty = <directory of the script>/charts/.
+HOST_IP=""
+HELM_REPO_SERVER_PORT="9000"
+CHARTS_DIR=""
 ```
 
 ### 2. Deploy with Incus (Default Containers)
@@ -99,9 +108,9 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 
 | File | Description |
 | :--- | :--- |
-| `inventory.txt` | Cluster inventory: Node static IPs, resource sizing, OS version, Kubernetes / Cilium versions, and (libvirt only) the Longhorn version and UI port (`LONGHORN_VERSION` / `LONGHORN_PORT`) |
-| `deploy_k8s.sh` | Master deployment script for Incus and LXD system containers (`-c incus\|lxd`) |
-| `deploy_k8s_libvirt.sh` | Master deployment script for libvirt (KVM Virtual Machines); it also installs `yq` and `chrony` on the host (the host is configured as a time server for the bridge subnet in step 10), prepares the golden node for Longhorn (`nfs-common`, multipath services disabled, kernel modules `dm_crypt` / `iscsi_tcp` / `nfs` loaded at boot, `iscsid` enabled) and for chrony (syncs from `BRIDGE_IPV4`) in step 12 and installs Longhorn in step 27 |
+| `inventory.txt` | Cluster inventory: Node static IPs, resource sizing, OS version, Kubernetes / Cilium versions, (libvirt only) the Longhorn version and UI port (`LONGHORN_VERSION` / `LONGHORN_PORT`), and the local Helm repo (`HOST_IP`, `HELM_REPO_SERVER_PORT`, `CHARTS_DIR`) |
+| `deploy_k8s.sh` | Master deployment script for Incus and LXD system containers (`-c incus\|lxd`); it also installs `chartmuseum` and `containerd` (with `nerdctl` and the CNI plugins from `kubernetes-cni`) on the host in step 20, runs chartmuseum as a systemd service in step 28 and adds the Helm repo `local` in step 29 |
+| `deploy_k8s_libvirt.sh` | Master deployment script for libvirt (KVM Virtual Machines); it also installs `yq`, `chartmuseum`, `containerd` (with `nerdctl` and the CNI plugins from `kubernetes-cni`) and `chrony` on the host, runs chartmuseum as a systemd service in step 30 and adds the Helm repo `local` in step 31 (the host is configured as a time server for the bridge subnet in step 10), prepares the golden node for Longhorn (`nfs-common`, multipath services disabled, kernel modules `dm_crypt` / `iscsi_tcp` / `nfs` loaded at boot, `iscsid` enabled) and for chrony (syncs from `BRIDGE_IPV4`) in step 12 and installs Longhorn in step 27 |
 | `steps.txt` | Unified step-by-step manual guide for Incus and LXD |
 | `steps_libvirt.txt` | Step-by-step manual guide for libvirt (KVM Virtual Machines) |
 | `backup/container-engine-init-config.yaml` | Reference copy of the parameterized container engine preseed configuration (Incus/LXD); not read by `deploy_k8s.sh`, which embeds the same content (`CONTAINER_ENGINE_INIT_CONFIG`), so change it in both places |

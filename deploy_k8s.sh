@@ -79,6 +79,19 @@ export CILIUM_VERSION="${CILIUM_VERSION:-1.20.2}"
 
 VIP="${VIP:-10.67.38.250}"
 BRIDGE_IPV4="${BRIDGE_IPV4:-10.67.38.1}"
+
+# Local Helm chart repository (chartmuseum, steps 28 and 29): checked here so a wrong value stops the script at the start.
+HELM_REPO_SERVER_PORT="${HELM_REPO_SERVER_PORT:-9000}"
+CHARTS_DIR="${CHARTS_DIR:-${SCRIPT_DIR}/charts/}"
+HOST_IP="${HOST_IP:-$BRIDGE_IPV4}"
+if [[ ! "$HELM_REPO_SERVER_PORT" =~ ^[0-9]+$ ]] || [ "$HELM_REPO_SERVER_PORT" -lt 1 ] || [ "$HELM_REPO_SERVER_PORT" -gt 65535 ]; then
+    error "Invalid HELM_REPO_SERVER_PORT='${HELM_REPO_SERVER_PORT}' in inventory.txt! It must be a port number (1-65535)."
+    exit 1
+fi
+if [[ "$CHARTS_DIR" != /*/ ]]; then
+    error "Invalid CHARTS_DIR='${CHARTS_DIR}' in inventory.txt! It must be an absolute path that ends with '/'."
+    exit 1
+fi
 BRIDGE_IPV6="${BRIDGE_IPV6:-fd42:51e5:ef75:abeb::1}"
 # Verify NUM_CP and NUM_WORKER
 NUM_CP="${NUM_CP:-3}"
@@ -1116,9 +1129,9 @@ done
 success "Certificate check timer enabled on all control plane nodes (${CP_NODES[*]})."
 
 # ------------------------------------------------------------------------------
-# Step 20: Install cilium CLI, helm, and kubectl on host
+# Step 20: Install cilium CLI, helm, kubectl, chartmuseum, and containerd (with nerdctl and CNI plugins) on host
 # ------------------------------------------------------------------------------
-step_header "20" "Install cilium CLI, Helm, and Kubectl on host"
+step_header "20" "Install cilium CLI, Helm, Kubectl, chartmuseum, and containerd (with nerdctl and CNI plugins) on host"
 
 # i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
@@ -1184,6 +1197,145 @@ else
     sudo apt-mark hold kubectl
     success "Kubectl installed successfully."
 fi
+
+# iv) chartmuseum (helm/chartmuseum, latest release; the binary path is the one used by chartmuseum.service in step 28)
+CHARTMUSEUM_BIN="/usr/local/bin/chartmuseum"
+if [ -x "$CHARTMUSEUM_BIN" ]; then
+    info "chartmuseum is already installed (${CHARTMUSEUM_BIN}). Skipping."
+else
+    info "Installing chartmuseum (latest release) on host..."
+    CM_ARCH=amd64
+    if [ "$(uname -m)" = "aarch64" ]; then CM_ARCH=arm64; fi
+    CM_TAG=$(curl -fsSL https://api.github.com/repos/helm/chartmuseum/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || true)
+    if [ -z "$CM_TAG" ]; then
+        error "Could not determine the latest chartmuseum release."
+        exit 1
+    fi
+    CM_DIST="chartmuseum-${CM_TAG}-linux-${CM_ARCH}.tar.gz"
+
+    info "Downloading ${CM_DIST}..."
+    TMP_CM_DIR=$(mktemp -d)
+    curl -L --fail --progress-bar "https://get.helm.sh/${CM_DIST}" -o "${TMP_CM_DIR}/${CM_DIST}"
+    curl -L --fail -s "https://get.helm.sh/${CM_DIST}.sha256sum" -o "${TMP_CM_DIR}/${CM_DIST}.sha256sum"
+
+    info "Verifying SHA256 checksum..."
+    CM_EXPECTED_SHA=$(awk '{print $1}' "${TMP_CM_DIR}/${CM_DIST}.sha256sum")
+    CM_ACTUAL_SHA=$(sha256sum "${TMP_CM_DIR}/${CM_DIST}" | awk '{print $1}')
+    if [ -z "$CM_EXPECTED_SHA" ] || [ "$CM_EXPECTED_SHA" != "$CM_ACTUAL_SHA" ]; then
+        error "chartmuseum checksum verification failed for ${CM_DIST}"
+        rm -rf "$TMP_CM_DIR"
+        exit 1
+    fi
+
+    tar -xzf "${TMP_CM_DIR}/${CM_DIST}" -C "$TMP_CM_DIR"
+    sudo install -m 0755 "${TMP_CM_DIR}/linux-${CM_ARCH}/chartmuseum" "$CHARTMUSEUM_BIN"
+    rm -rf "$TMP_CM_DIR"
+    success "chartmuseum ${CM_TAG} installed successfully."
+fi
+
+# v) containerd (with nerdctl and the CNI plugins) on the host. It follows the node1 runtime setup (step 11) without the
+# Kubernetes-only parts (pause image, kubeadm image pre-pull, kubelet / kubeadm / cri-tools), so Kubernetes can be added to
+# the host later. Every part is skipped if it is already in place; existing files are kept unchanged.
+CONTAINERD_CHANGED=false
+
+# a) containerd.io (Docker apt repository)
+if dpkg -s containerd.io >/dev/null 2>&1; then
+    info "containerd.io is already installed ($(dpkg-query -W -f='${Version}' containerd.io)). Skipping."
+else
+    info "Installing containerd.io on host via APT (Docker repository)..."
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq ca-certificates curl gpg
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    HOST_UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    HOST_DPKG_ARCH=$(dpkg --print-architecture)
+    printf 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n' \
+        "$HOST_UBUNTU_CODENAME" "$HOST_DPKG_ARCH" | sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null
+    sudo apt-get update -qq
+    sudo apt-get install -y containerd.io
+    success "containerd.io installed successfully."
+fi
+
+# b) containerd config (SystemdCgroup = true, disabled_plugins = []); the original config is kept once as config.toml.bak
+CONTAINERD_CONFIG="/etc/containerd/config.toml"
+if [ -f "$CONTAINERD_CONFIG" ] && grep -q 'SystemdCgroup = true' "$CONTAINERD_CONFIG" && grep -q '^disabled_plugins = \[\]' "$CONTAINERD_CONFIG"; then
+    info "containerd is already configured (${CONTAINERD_CONFIG}). Skipping."
+else
+    info "Writing the default containerd config with SystemdCgroup = true and disabled_plugins = []..."
+    sudo mkdir -p /etc/containerd
+    if [ -f "$CONTAINERD_CONFIG" ] && [ ! -f "${CONTAINERD_CONFIG}.bak" ]; then
+        sudo cp -a "$CONTAINERD_CONFIG" "${CONTAINERD_CONFIG}.bak"
+    fi
+    containerd config default | sudo tee "$CONTAINERD_CONFIG" >/dev/null
+    sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' "$CONTAINERD_CONFIG"
+    sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' "$CONTAINERD_CONFIG"
+    CONTAINERD_CHANGED=true
+fi
+
+# c) nerdctl (latest release, minimal build, SHA-256 verified; the tag comes from the redirect of .../releases/latest, so there is
+# no GitHub API rate limit). /usr/local/bin is on sudo's secure_path, so 'sudo nerdctl' works for the root-owned containerd socket.
+NERDCTL_BIN="/usr/local/bin/nerdctl"
+if [ -x "$NERDCTL_BIN" ]; then
+    info "nerdctl is already installed (${NERDCTL_BIN}). Skipping."
+else
+    info "Installing nerdctl (latest release) on host..."
+    NERDCTL_ARCH=$(dpkg --print-architecture)
+    NERDCTL_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/containerd/nerdctl/releases/latest)
+    NERDCTL_TAG="${NERDCTL_TAG##*/}"
+    if [[ ! "$NERDCTL_TAG" =~ ^v[0-9] ]]; then
+        error "Could not determine the latest nerdctl release (got '${NERDCTL_TAG}')."
+        exit 1
+    fi
+    NERDCTL_TGZ="nerdctl-${NERDCTL_TAG#v}-linux-${NERDCTL_ARCH}.tar.gz"
+    NERDCTL_URL="https://github.com/containerd/nerdctl/releases/download/${NERDCTL_TAG}"
+    TMP_NERDCTL_DIR=$(mktemp -d)
+    curl -fsSL "${NERDCTL_URL}/${NERDCTL_TGZ}" -o "${TMP_NERDCTL_DIR}/${NERDCTL_TGZ}"
+    curl -fsSL "${NERDCTL_URL}/SHA256SUMS" -o "${TMP_NERDCTL_DIR}/SHA256SUMS"
+    info "Verifying SHA256 checksum..."
+    (cd "$TMP_NERDCTL_DIR" && grep " ${NERDCTL_TGZ}\$" SHA256SUMS | sha256sum -c - >/dev/null) || {
+        error "nerdctl checksum verification failed for ${NERDCTL_TGZ}"
+        rm -rf "$TMP_NERDCTL_DIR"
+        exit 1
+    }
+    tar -xzf "${TMP_NERDCTL_DIR}/${NERDCTL_TGZ}" -C "$TMP_NERDCTL_DIR" nerdctl
+    sudo install -m 0755 "${TMP_NERDCTL_DIR}/nerdctl" "$NERDCTL_BIN"
+    rm -rf "$TMP_NERDCTL_DIR"
+    success "nerdctl ${NERDCTL_TAG} installed successfully."
+fi
+# Default containerd namespace of nerdctl: the one Kubernetes uses (same as on the golden node)
+if [ ! -f /etc/nerdctl/nerdctl.toml ]; then
+    sudo mkdir -p /etc/nerdctl
+    echo 'namespace = "k8s.io"' | sudo tee /etc/nerdctl/nerdctl.toml >/dev/null
+fi
+
+# d) CNI plugins (kubernetes-cni from the Kubernetes apt repository; installs to /opt/cni/bin, where containerd and nerdctl look)
+if dpkg -s kubernetes-cni >/dev/null 2>&1; then
+    info "kubernetes-cni is already installed ($(dpkg-query -W -f='${Version}' kubernetes-cni)). Skipping."
+else
+    info "Installing kubernetes-cni (${KUBERNETES_VERSION}) on host via APT..."
+    if [ ! -f /etc/apt/sources.list.d/kubernetes.list ]; then
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq apt-transport-https ca-certificates curl gpg
+        sudo mkdir -p /etc/apt/keyrings
+        curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" | sudo gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list
+    fi
+    sudo apt-get update -qq
+    sudo apt-get install -y kubernetes-cni
+    success "kubernetes-cni installed successfully."
+fi
+
+# e) Reload systemd and (re)start containerd: restart only if the config changed above
+sudo systemctl daemon-reload
+sudo systemctl enable containerd
+if [ "$CONTAINERD_CHANGED" = true ]; then
+    sudo systemctl restart containerd
+else
+    sudo systemctl start containerd
+fi
+success "containerd $(containerd --version | awk '{print $3}') is running on the host ($(nerdctl --version))."
+
 success "Host tooling ready."
 
 # ------------------------------------------------------------------------------
@@ -1254,6 +1406,56 @@ kubectl apply -f "${SCRIPT_DIR}/dnsutils.yaml"
 info "Waiting for dnsutils pod to be created/ready..."
 kubectl wait --for=condition=Ready pod/dnsutils --timeout=120s || true
 kubectl get pods -A
+
+# ------------------------------------------------------------------------------
+# Step 28: Install chartmuseum.service (local Helm chart repository, HELM_REPO_SERVER_PORT / CHARTS_DIR from inventory.txt)
+# ------------------------------------------------------------------------------
+step_header "28" "Install chartmuseum.service (port ${HELM_REPO_SERVER_PORT}, charts in ${CHARTS_DIR})"
+# Created as the login user, so the directory is not owned by root (the service itself runs as root).
+mkdir -p "$CHARTS_DIR"
+info "Writing /etc/systemd/system/chartmuseum.service (overwritten if it exists)..."
+sudo tee /etc/systemd/system/chartmuseum.service >/dev/null <<CHARTMUSEUM_EOF
+[Unit]
+Description=Chartmuseum for serving Helm charts locally
+After=kubelet.service
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/chartmuseum --debug --port=${HELM_REPO_SERVER_PORT} --storage=local --storage-local-rootdir=${CHARTS_DIR}
+TimeoutStartSec=600
+LogLevelMax=notice
+
+[Install]
+WantedBy=multi-user.target
+CHARTMUSEUM_EOF
+sudo systemctl daemon-reload
+sudo systemctl enable chartmuseum.service
+# 'restart' (not 'start'): a re-run with a changed port or directory must also take effect when the service is running.
+sudo systemctl restart chartmuseum.service
+
+info "Waiting for chartmuseum to answer on port ${HELM_REPO_SERVER_PORT}..."
+CM_READY=false
+for _ in $(seq 1 30); do
+    if curl -fsS "http://127.0.0.1:${HELM_REPO_SERVER_PORT}/health" >/dev/null 2>&1; then
+        CM_READY=true
+        break
+    fi
+    sleep 1
+done
+if ! $CM_READY; then
+    error "chartmuseum did not become healthy on port ${HELM_REPO_SERVER_PORT}. Check: sudo journalctl -u chartmuseum.service"
+    exit 1
+fi
+success "chartmuseum.service is running (http://${HOST_IP}:${HELM_REPO_SERVER_PORT}, charts in ${CHARTS_DIR})."
+
+# ------------------------------------------------------------------------------
+# Step 29: Set up the local Helm repo (served by chartmuseum, step 28)
+# ------------------------------------------------------------------------------
+step_header "29" "Set up the local Helm repo (http://${HOST_IP}:${HELM_REPO_SERVER_PORT})"
+helm repo remove local || true
+helm repo add local "http://${HOST_IP}:${HELM_REPO_SERVER_PORT}"
+helm repo update
+helm repo list
 
 echo -e "\n${GREEN}======================================================================${NC}"
 echo -e "${GREEN}==> Kubernetes HA Cluster on ${ENGINE_NAME} completed successfully!${NC}"
