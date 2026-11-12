@@ -1180,9 +1180,9 @@ done
 success "Certificate check timer enabled on all control plane nodes (${CP_NODES[*]})."
 
 # ------------------------------------------------------------------------------
-# Step 21: Install cilium CLI, helm, kubectl, yq, chartmuseum, and containerd (with nerdctl and CNI plugins) on host
+# Step 21: Install cilium CLI, helm, kubectl, yq, chartmuseum, containerd (with nerdctl and CNI plugins), and BuildKit on host
 # ------------------------------------------------------------------------------
-step_header "21" "Install cilium CLI, Helm, Kubectl, yq, chartmuseum, and containerd (with nerdctl and CNI plugins) on host"
+step_header "21" "Install cilium CLI, Helm, Kubectl, yq, chartmuseum, containerd (with nerdctl and CNI plugins), and BuildKit on host"
 
 # i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
@@ -1432,6 +1432,94 @@ else
     sudo systemctl start containerd
 fi
 success "containerd $(containerd --version | awk '{print $3}') is running on the host ($(nerdctl --version))."
+
+# vii) BuildKit on the host (latest release from github.com/moby/buildkit, installed to /usr/local/bin). The tag comes from the
+# redirect of .../releases/latest, so there is no GitHub API rate limit. The release publishes no checksum file, so the download
+# is not checksum-verified (it is fetched over HTTPS from GitHub). Every part is skipped if it is already in place.
+BUILDKIT_CHANGED=false
+
+# a) buildkit binaries (buildkitd, buildctl, ...)
+BUILDKITD_BIN="/usr/local/bin/buildkitd"
+if [ -x "$BUILDKITD_BIN" ]; then
+    info "buildkitd is already installed (${BUILDKITD_BIN}). Skipping."
+else
+    info "Installing BuildKit (latest release) on host..."
+    BUILDKIT_ARCH=$(dpkg --print-architecture)
+    BUILDKIT_TAG=$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/moby/buildkit/releases/latest)
+    BUILDKIT_TAG="${BUILDKIT_TAG##*/}"
+    if [[ ! "$BUILDKIT_TAG" =~ ^v[0-9] ]]; then
+        error "Could not determine the latest BuildKit release (got '${BUILDKIT_TAG}')."
+        exit 1
+    fi
+    BUILDKIT_TGZ="buildkit-${BUILDKIT_TAG}.linux-${BUILDKIT_ARCH}.tar.gz"
+    TMP_BUILDKIT_DIR=$(mktemp -d)
+    info "Downloading ${BUILDKIT_TGZ}..."
+    curl -L --fail --progress-bar "https://github.com/moby/buildkit/releases/download/${BUILDKIT_TAG}/${BUILDKIT_TGZ}" -o "${TMP_BUILDKIT_DIR}/${BUILDKIT_TGZ}"
+    # The archive holds bin/buildkitd, bin/buildctl, ...; extracting into /usr/local puts them in /usr/local/bin
+    sudo tar -xzf "${TMP_BUILDKIT_DIR}/${BUILDKIT_TGZ}" -C /usr/local
+    rm -rf "$TMP_BUILDKIT_DIR"
+    BUILDKIT_CHANGED=true
+    success "BuildKit ${BUILDKIT_TAG} installed successfully."
+fi
+
+# b) systemd unit
+BUILDKITD_UNIT="/etc/systemd/system/buildkitd.service"
+if [ -f "$BUILDKITD_UNIT" ]; then
+    info "${BUILDKITD_UNIT} already exists. Skipping."
+else
+    info "Writing ${BUILDKITD_UNIT}..."
+    sudo tee "$BUILDKITD_UNIT" >/dev/null <<'BUILDKITD_UNIT_EOF'
+[Unit]
+Description=buildkitd
+After=network-online.target firewalld.service containerd.service time-set.target
+Wants=network-online.target containerd.service
+
+[Service]
+Type=notify
+ExecStart=buildkitd
+TimeoutStartSec=0
+RestartSec=2
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+BUILDKITD_UNIT_EOF
+    BUILDKIT_CHANGED=true
+fi
+
+# c) buildkitd config: the local registry on the host is plain HTTP
+BUILDKITD_CONFIG="/etc/buildkit/buildkitd.toml"
+if [ -f "$BUILDKITD_CONFIG" ]; then
+    info "${BUILDKITD_CONFIG} already exists. Skipping."
+else
+    info "Writing ${BUILDKITD_CONFIG} (registry ${HOST_IP}:5000 over http)..."
+    sudo mkdir -p /etc/buildkit
+    sudo tee "$BUILDKITD_CONFIG" >/dev/null <<BUILDKITD_CONFIG_EOF
+[registry."${HOST_IP}:5000"]
+  http = true
+BUILDKITD_CONFIG_EOF
+    BUILDKIT_CHANGED=true
+fi
+
+# d) buildkitd shares the containerd systemd drop-ins through a symlink; the directory is created first so the link is never dangling
+BUILDKITD_DROPIN_DIR="/etc/systemd/system/buildkitd.service.d"
+if [ -e "$BUILDKITD_DROPIN_DIR" ] || [ -L "$BUILDKITD_DROPIN_DIR" ]; then
+    info "${BUILDKITD_DROPIN_DIR} already exists. Skipping."
+else
+    sudo mkdir -p /etc/systemd/system/containerd.service.d
+    sudo ln -s /etc/systemd/system/containerd.service.d "$BUILDKITD_DROPIN_DIR"
+    BUILDKIT_CHANGED=true
+fi
+
+# e) Reload systemd and enable buildkitd; restart it if anything changed above, otherwise just start it
+sudo systemctl daemon-reload
+sudo systemctl enable buildkitd
+if [ "$BUILDKIT_CHANGED" = true ]; then
+    sudo systemctl restart buildkitd
+else
+    sudo systemctl start buildkitd
+fi
+success "buildkitd is running on the host ($(buildkitd --version | awk '{print $3}'))."
 
 success "Host tooling ready."
 
