@@ -78,7 +78,8 @@ LONGHORN_PORT="9080"
 # Local Helm chart repository (host; deploy_k8s.sh steps 28 and 29, deploy_k8s_libvirt.sh steps 30 and 31): chartmuseum.service
 # serves the charts in CHARTS_DIR on HELM_REPO_SERVER_PORT, and the Helm repo 'local' is added at
 # http://${HOST_IP}:${HELM_REPO_SERVER_PORT}.
-# HOST_IP: address of this host; empty = BRIDGE_IPV4 (the host address on the bridge).
+# HOST_IP: address of this host; empty = BRIDGE_IPV4 (the host address on the bridge). It is also the address of the plain-http registry
+# ${HOST_IP}:5000 (a container on the host; containerd on the golden node, and so every node, and buildkitd on the host use it).
 # CHARTS_DIR: absolute path that must end with '/'; created if missing; empty = <directory of the script>/charts/.
 HOST_IP=""
 HELM_REPO_SERVER_PORT="9000"
@@ -109,8 +110,8 @@ CONTAINER_PASS="your_password" ./deploy_k8s.sh -c lxd
 | File | Description |
 | :--- | :--- |
 | `inventory.txt` | Cluster inventory: Node static IPs, resource sizing, OS version, Kubernetes / Cilium versions, (libvirt only) the Longhorn version and UI port (`LONGHORN_VERSION` / `LONGHORN_PORT`), and the local Helm repo (`HOST_IP`, `HELM_REPO_SERVER_PORT`, `CHARTS_DIR`) |
-| `deploy_k8s.sh` | Master deployment script for Incus and LXD system containers (`-c incus\|lxd`); it also installs `chartmuseum` and `containerd` (with `nerdctl` and the CNI plugins from `kubernetes-cni`) and BuildKit (latest release, `buildkitd.service` with `/etc/buildkit/buildkitd.toml`) on the host in step 20, runs chartmuseum as a systemd service in step 28 and adds the Helm repo `local` in step 29 |
-| `deploy_k8s_libvirt.sh` | Master deployment script for libvirt (KVM Virtual Machines); it also installs `yq`, `chartmuseum`, `containerd` (with `nerdctl` and the CNI plugins from `kubernetes-cni`), BuildKit (latest release, `buildkitd.service` with `/etc/buildkit/buildkitd.toml`) and `chrony` on the host, runs chartmuseum as a systemd service in step 30 and adds the Helm repo `local` in step 31 (the host is configured as a time server for the bridge subnet in step 10), prepares the golden node for Longhorn (`nfs-common`, multipath services disabled, kernel modules `dm_crypt` / `iscsi_tcp` / `nfs` loaded at boot, `iscsid` enabled) and for chrony (syncs from `BRIDGE_IPV4`) in step 12 and installs Longhorn in step 27 |
+| `deploy_k8s.sh` | Master deployment script for Incus and LXD system containers (`-c incus\|lxd`); it also installs `chartmuseum` and `containerd` (with `nerdctl` and the CNI plugins from `kubernetes-cni`) and BuildKit (latest release, `buildkitd.service` with `/etc/buildkit/buildkitd.toml`) and a local container registry (`registry:3`, port 5000, started with `nerdctl run`) on the host in step 20, installs `python-is-python3` on the host in step 1, runs chartmuseum as a systemd service in step 28 and adds the Helm repo `local` in step 29 |
+| `deploy_k8s_libvirt.sh` | Master deployment script for libvirt (KVM Virtual Machines); it also installs `yq`, `chartmuseum`, `containerd` (with `nerdctl` and the CNI plugins from `kubernetes-cni`), BuildKit (latest release, `buildkitd.service` with `/etc/buildkit/buildkitd.toml`), a local container registry (`registry:3`, port 5000, started with `nerdctl run`), `python-is-python3` and `chrony` on the host, runs chartmuseum as a systemd service in step 30 and adds the Helm repo `local` in step 31 (the host is configured as a time server for the bridge subnet in step 10), prepares the golden node for Longhorn (`nfs-common`, multipath services disabled, kernel modules `dm_crypt` / `iscsi_tcp` / `nfs` loaded at boot, `iscsid` enabled) and for chrony (syncs from `BRIDGE_IPV4`) in step 12 and installs Longhorn in step 27 |
 | `steps.txt` | Unified step-by-step manual guide for Incus and LXD |
 | `steps_libvirt.txt` | Step-by-step manual guide for libvirt (KVM Virtual Machines) |
 | `backup/container-engine-init-config.yaml` | Reference copy of the parameterized container engine preseed configuration (Incus/LXD); not read by `deploy_k8s.sh`, which embeds the same content (`CONTAINER_ENGINE_INIT_CONFIG`), so change it in both places |

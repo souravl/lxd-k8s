@@ -44,7 +44,8 @@ LONGHORN_PORT="9080"
 # Local Helm chart repository (host; deploy_k8s.sh steps 28 and 29, deploy_k8s_libvirt.sh steps 30 and 31): chartmuseum.service
 # serves the charts in CHARTS_DIR on HELM_REPO_SERVER_PORT, and the Helm repo 'local' is added at
 # http://${HOST_IP}:${HELM_REPO_SERVER_PORT}.
-# HOST_IP: address of this host; empty = BRIDGE_IPV4 (the host address on the bridge).
+# HOST_IP: address of this host; empty = BRIDGE_IPV4 (the host address on the bridge). It is also the address of the plain-http registry
+# ${HOST_IP}:5000 (a container on the host; containerd on the golden node, and so every node, and buildkitd on the host use it).
 # CHARTS_DIR: absolute path that must end with '/'; created if missing; empty = <directory of the script>/charts/.
 HOST_IP=""
 HELM_REPO_SERVER_PORT="9000"

@@ -10,9 +10,9 @@
 # ==============================================================================
 
 1. Install Hypervisor & Virtualization Tools:
-   - Install QEMU/KVM, libvirt, virtinst, cloud tools, and chrony on the host:
+   - Install QEMU/KVM, libvirt, virtinst, cloud tools, chrony, and python-is-python3 on the host:
      sudo apt-get update
-     sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools chrony
+     sudo apt-get install -y qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils virtinst libguestfs-tools chrony python-is-python3
    - Ensure the libvirt service is enabled and running:
      sudo systemctl enable --now libvirtd
 
@@ -195,6 +195,19 @@ EOF
            sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
          - disabled_plugins = [] (ensures CRI plugin is active):
            sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
+         - Plain-http registry on the host (containerd 2.x): set config_path in the registry section
+           [plugins.'io.containerd.cri.v1.images'.registry] to the directory with the per-registry host files
+           (the script changes only that line and fails if it cannot):
+             config_path = '/etc/containerd/certs.d'
+           Then create the host file for the registry at <HOST_IP>:5000 (HOST_IP comes from inventory.txt or defaults to the bridge IP):
+             sudo mkdir -p "/etc/containerd/certs.d/<HOST_IP>:5000"
+             sudo tee "/etc/containerd/certs.d/<HOST_IP>:5000/hosts.toml" <<EOF
+             server = "http://<HOST_IP>:5000"
+             [host."http://<HOST_IP>:5000"]
+               capabilities = ["pull", "resolve", "push"]
+               skip_verify = true
+             EOF
+           (Cloned nodes inherit both. The restart in the next item activates it.)
     viii) Reload systemd daemon and restart containerd:
          sudo systemctl daemon-reload
          sudo systemctl restart containerd
@@ -410,7 +423,7 @@ EOF
      ~/.kube/config to ~/.kube/config of the ssh user and of root on every worker node.)
 
 21. Install host tools:
-    On the host machine, install Cilium CLI, Helm, Kubectl, yq, chartmuseum, containerd with nerdctl and the CNI plugins, and BuildKit (each is skipped if already installed):
+    On the host machine, install Cilium CLI, Helm, Kubectl, yq, chartmuseum, containerd with nerdctl and the CNI plugins, BuildKit, and a local registry container (each is skipped if already installed):
     i)   Install Cilium CLI:
          CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
          CLI_ARCH=amd64; if [ "$(uname -m)" = "aarch64" ]; then CLI_ARCH=arm64; fi
@@ -500,6 +513,10 @@ EOF
               sudo ln -s /etc/systemd/system/containerd.service.d /etc/systemd/system/buildkitd.service.d
          e) Reload systemd and enable buildkitd; restart it if anything was installed or written in a) .. d), otherwise just start it:
               sudo systemctl daemon-reload && sudo systemctl enable buildkitd && sudo systemctl restart buildkitd
+    vii)  Start the local container registry on the host (plain http on port 5000, reachable as <HOST_IP>:5000; nerdctl uses the
+         k8s.io namespace from /etc/nerdctl/nerdctl.toml). Skipped if a container named "registry" is already running;
+         an existing stopped one is started with "sudo nerdctl start registry":
+              sudo nerdctl run -d -p 5000:5000 --restart=always --name registry registry:3
 
 22. Remove control-plane taints from control plane nodes:
     Run on host for each control plane node (node1 .. node${NUM_CP}):

@@ -247,7 +247,14 @@ info "Nodes configuration: ${NUM_CP} control plane node(s), ${NUM_WORKER} worker
 # Step 1: Install container engine on host
 # ------------------------------------------------------------------------------
 if [ "${_SKIP_STEP1:-false}" != "true" ]; then
-    step_header "1" "Install ${ENGINE_NAME} on host"
+    step_header "1" "Install ${ENGINE_NAME} and python-is-python3 on host"
+    if ! dpkg -s python-is-python3 >/dev/null 2>&1; then
+        info "Installing python-is-python3..."
+        sudo apt-get update -qq
+        sudo apt-get install -y python-is-python3
+    else
+        info "python-is-python3 is already installed."
+    fi
     if [ "$ENGINE" = "incus" ]; then
         if ! command -v incus >/dev/null 2>&1; then
             info "Installing Incus via APT..."
@@ -649,17 +656,33 @@ DOCKER_EOF
     sudo apt-get install -y containerd.io
 EOF
 
-# ii) Configure containerd (SystemdCgroup = true, disabled_plugins = [])
+# ii) Configure containerd (SystemdCgroup = true, disabled_plugins = [], plain-http registry ${HOST_IP}:5000)
 info "Configuring containerd on $NODE..."
-ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "
+ssh "${SSH_OPTS[@]}" "${SSH_USER}@${NODE}" "HOST_IP='${HOST_IP}' bash -s" <<'EOF'
+    set -euo pipefail
     sudo rm -rf /etc/containerd/config.toml
     sudo mkdir -p /etc/containerd
     containerd config default | sudo tee /etc/containerd/config.toml >/dev/null
     sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
     sudo sed -i 's/disabled_plugins = .*/disabled_plugins = []/g' /etc/containerd/config.toml
+    # Plain-http registry on the host (containerd 2.x): point the registry section's config_path at /etc/containerd/certs.d
+    # (only the config_path line inside the [plugins.'io.containerd.cri.v1.images'.registry] section is changed) ...
+    sudo sed -i "/^[[:space:]]*\[plugins\.'io\.containerd\.cri\.v1\.images'\.registry\][[:space:]]*\$/,/^[[:space:]]*\[/ s|config_path = .*|config_path = '/etc/containerd/certs.d'|" /etc/containerd/config.toml
+    if ! grep -q "config_path = '/etc/containerd/certs.d'" /etc/containerd/config.toml; then
+        echo "ERROR: could not set config_path in the [plugins.'io.containerd.cri.v1.images'.registry] section of /etc/containerd/config.toml (is this not containerd 2.x?)." >&2
+        exit 1
+    fi
+    # ... and add the host entry for the registry at ${HOST_IP}:5000 (plain http, pull / resolve / push, no TLS verification).
+    sudo mkdir -p "/etc/containerd/certs.d/${HOST_IP}:5000"
+    sudo tee "/etc/containerd/certs.d/${HOST_IP}:5000/hosts.toml" >/dev/null <<HOSTS_EOF
+server = "http://${HOST_IP}:5000"
+[host."http://${HOST_IP}:5000"]
+  capabilities = ["pull", "resolve", "push"]
+  skip_verify = true
+HOSTS_EOF
     sudo systemctl daemon-reload
     sudo systemctl restart containerd
-"
+EOF
 
 # iii) Install Kubernetes packages (kubelet, kubeadm, kubectl, cri-tools)
 info "Installing Kubernetes packages (${KUBERNETES_VERSION}) on $NODE..."
@@ -1129,9 +1152,9 @@ done
 success "Certificate check timer enabled on all control plane nodes (${CP_NODES[*]})."
 
 # ------------------------------------------------------------------------------
-# Step 20: Install cilium CLI, helm, kubectl, chartmuseum, containerd (with nerdctl and CNI plugins), and BuildKit on host
+# Step 20: Install cilium CLI, helm, kubectl, chartmuseum, containerd (with nerdctl and CNI plugins), BuildKit, and a local registry on host
 # ------------------------------------------------------------------------------
-step_header "20" "Install cilium CLI, Helm, Kubectl, chartmuseum, containerd (with nerdctl and CNI plugins), and BuildKit on host"
+step_header "20" "Install cilium CLI, Helm, Kubectl, chartmuseum, containerd (with nerdctl and CNI plugins), BuildKit, and a local registry on host"
 
 # i) Cilium CLI
 if command -v cilium >/dev/null 2>&1; then
@@ -1423,6 +1446,21 @@ else
     sudo systemctl start buildkitd
 fi
 success "buildkitd is running on the host ($(buildkitd --version | awk '{print $3}'))."
+
+# vii) Local container registry on the host (registry:3 on port 5000, plain http; the nodes' containerd and buildkitd use it as ${HOST_IP}:5000).
+# nerdctl uses the k8s.io namespace here (/etc/nerdctl/nerdctl.toml).
+if sudo nerdctl ps -a --format '{{.Names}}' | grep -qx registry; then
+    if sudo nerdctl ps --format '{{.Names}}' | grep -qx registry; then
+        info "The container 'registry' is already running. Skipping."
+    else
+        info "The container 'registry' exists but is not running; starting it..."
+        sudo nerdctl start registry
+    fi
+else
+    info "Starting the local registry container (registry:3, port 5000)..."
+    sudo nerdctl run -d -p 5000:5000 --restart=always --name registry registry:3
+fi
+success "Local registry is available on the host (${HOST_IP}:5000)."
 
 success "Host tooling ready."
 
