@@ -1,0 +1,2 @@
+certs/renew_k8s_kubelet_client_cert_from_host.sh
+certs/renew_k8s_control_plane_certs_from_host.sh
