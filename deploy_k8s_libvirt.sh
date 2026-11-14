@@ -332,6 +332,39 @@ sudo sysctl --system
 step_header "6" "Configure libvirt 'default' network for gateway ${BRIDGE_IPV4}"
 SUBNET_PREFIX="${BRIDGE_IPV4%.*}"
 
+# libvirt creates its firewall chains (LIBVIRT_INP, LIBVIRT_PRT, ...) and the NAT rule of the 'default' network only when libvirtd
+# starts or the network starts. If something flushes the firewall afterwards (iptables -F, nft flush ruleset, a cleanup after
+# kubeadm reset), the VMs lose all access outside the host (apt downloads time out) and 'virsh net-start default' fails with
+# "Failed to apply firewall rules ... No chain/target/match by that name". Restarting libvirtd recreates the chains and rules;
+# running VMs are not affected by the restart.
+restart_libvirtd() {
+    sudo systemctl restart libvirtd
+    local i
+    for i in $(seq 1 15); do
+        if virsh list >/dev/null 2>&1; then return 0; fi
+        sleep 1
+    done
+    error "libvirtd did not answer within 15 seconds after the restart."
+    exit 1
+}
+
+# start_default_net: virsh net-start default; if that fails (e.g. the firewall chains are gone), restart libvirtd once and retry
+start_default_net() {
+    if virsh net-start default; then return 0; fi
+    warn "Could not start the libvirt 'default' network (libvirt's firewall chains may have been flushed). Restarting libvirtd and retrying..."
+    restart_libvirtd
+    if ! virsh net-list --name | grep -qx default; then
+        virsh net-start default
+    fi
+}
+
+# libvirt_nat_present: true if a masquerade (NAT) rule for the subnet of the 'default' network exists (iptables or nftables rules)
+libvirt_nat_present() {
+    local rules
+    rules=$({ sudo iptables -t nat -S 2>/dev/null; command -v nft >/dev/null 2>&1 && sudo nft list ruleset 2>/dev/null; } || true)
+    grep -i masquerade <<<"$rules" | grep -F "${SUBNET_PREFIX}.0/24" >/dev/null
+}
+
 # If 'default' network is not defined at all in libvirt, define it
 if ! virsh net-info default >/dev/null 2>&1; then
     if [ -f /etc/libvirt/qemu/networks/default.xml ]; then
@@ -367,7 +400,7 @@ if [ "$CURRENT_IP" != "$BRIDGE_IPV4" ]; then
     sed -i -E "s|<range start=['\"][^'\"]*['\"] end=['\"][^'\"]*['\"]/>|<range start='${SUBNET_PREFIX}.100' end='${SUBNET_PREFIX}.200'/>|g" "$TMP_NET"
     virsh net-define "$TMP_NET"
     virsh net-destroy default 2>/dev/null || true
-    virsh net-start default
+    start_default_net
     virsh net-autostart default
     rm -f "$TMP_NET"
     success "Default libvirt network configured on ${BRIDGE_IPV4}."
@@ -377,6 +410,26 @@ else
         virsh net-start default
     fi
     virsh net-autostart default 2>/dev/null || true
+fi
+
+# The network is up; make sure its NAT rule exists (it is missing after a firewall flush, see restart_libvirtd above)
+if virsh net-dumpxml default 2>/dev/null | grep -q "<forward mode='nat'"; then
+    if libvirt_nat_present; then
+        info "NAT rule for ${SUBNET_PREFIX}.0/24 is present."
+    else
+        warn "No NAT (masquerade) rule for ${SUBNET_PREFIX}.0/24 found: the firewall was probably flushed after libvirtd started. Restarting libvirtd to recreate libvirt's rules..."
+        restart_libvirtd
+        if ! virsh net-list --name | grep -qx default; then
+            virsh net-start default
+        fi
+        if libvirt_nat_present; then
+            success "libvirt's NAT rule for ${SUBNET_PREFIX}.0/24 was recreated."
+        else
+            error "Still no NAT rule for ${SUBNET_PREFIX}.0/24 after restarting libvirtd; the VMs would have no access outside the host."
+            error "Check 'sudo nft list ruleset' and 'sudo iptables -t nat -S', then re-run."
+            exit 1
+        fi
+    fi
 fi
 
 # ------------------------------------------------------------------------------

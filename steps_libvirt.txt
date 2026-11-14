@@ -57,6 +57,13 @@ EOF
      virsh net-start default
      virsh net-autostart default
    (Note: Node static IPs are NOT hardcoded here; they are registered dynamically at VM creation time in Steps 9 and 13).
+   - Check libvirt's NAT rule (the script does this automatically): the 'default' network needs a masquerade rule for its subnet, e.g.
+     sudo nft list ruleset | grep -i masquerade | grep 10.67.38.0/24        (or: sudo iptables -t nat -S | grep -i masquerade)
+     If a firewall flush (iptables -F, nft flush ruleset, a cleanup after kubeadm reset) removed libvirt's chains and rules, the VMs have no access outside the host
+     (apt downloads time out) and 'virsh net-start default' fails with "Failed to apply firewall rules ... No chain/target/match by that name".
+     Restarting libvirtd recreates them (running VMs are not affected); the script restarts it once, starts the network if it is not active, and stops with an error if the rule is still missing:
+     sudo systemctl restart libvirtd
+     virsh net-list --name | grep -qx default || virsh net-start default
 
 7. Configure Docker and bridge iptables coexistence (if Docker is running):
    - Add rules for virbr0 to DOCKER-USER chain and ensure NAT masquerading:
