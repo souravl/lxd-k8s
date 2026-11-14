@@ -50,6 +50,7 @@ We have automated and verified the deployment of a High-Availability, multi-cont
 - **[`inventory.txt`](inventory.txt)**: Centralized cluster inventory declaring `NUM_CP`, `NUM_WORKER`, `VIP`, bridge network gateways, static node IPs, resource sizing (`LIMITS_CPU`, `LIMITS_MEMORY`, `LIMITS_DISK`), and software versions (for libvirt also `LONGHORN_VERSION` and the Longhorn UI port `LONGHORN_PORT`; `deploy_k8s.sh` ignores them).
 - **[`steps.txt`](steps.txt)**: Unified step-by-step manual reference for Incus and LXD system containers.
 - **[`steps_libvirt.txt`](steps_libvirt.txt)**: Step-by-step manual reference for libvirt KVM virtual machines.
+- **[`remove_host_tools.sh`](remove_host_tools.sh)**: Separate script (not a deployment step) that undoes the host tooling installed by `deploy_k8s_libvirt.sh` (steps 21, 30 and 31) and `deploy_k8s.sh` (steps 20, 28 and 29), in the right order and without touching the cluster or its containers / VMs. Usage: `./remove_host_tools.sh [-n] [-y] [-d]` (`-n` dry run, `-y` no confirmation, `-d` also delete `/var/lib/containerd`, `/var/lib/nerdctl` and `/var/lib/buildkit`). Details are in the `README.md` file table.
 - **Unified Parameterized Configurations**:
   - `backup/container-engine-init-config.yaml`: Reference copy of the preseed initialization config parameterizing bridge and storage pool directory.
   - `backup/k8s-container-profile-config.yaml`: Reference copy of the profile configuration parameterizing bridge, CPU, and memory limits.

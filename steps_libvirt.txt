@@ -517,6 +517,14 @@ EOF
          k8s.io namespace from /etc/nerdctl/nerdctl.toml). Skipped if a container named "registry" is already running;
          an existing stopped one is started with "sudo nerdctl start registry":
               sudo nerdctl run -d -p 5000:5000 --restart=always --name registry registry:3
+    To undo all of step 21 (and steps 30 and 31) on the host, run ./remove_host_tools.sh (a separate script, not part of the deployment):
+         -n dry run (prints the commands, changes nothing), -y no confirmation prompt, -d also delete /var/lib/containerd, /var/lib/nerdctl and /var/lib/buildkit.
+         It removes, in this order: the "local" Helm repo (helm repo remove local), chartmuseum.service and /usr/local/bin/chartmuseum, the "registry" container
+         and the registry:3 image (sudo nerdctl rm -f -v registry; sudo nerdctl rmi -f registry:3), buildkitd.service with /etc/buildkit, the buildkitd.service.d link
+         and the buildkit binaries, nerdctl with /etc/nerdctl, containerd.io with /etc/containerd, containerd.service.d and the Docker apt repo,
+         kubectl (apt-mark unhold first) and kubernetes-cni with the Kubernetes apt repo, helm with its apt repo, yq and cilium.
+         It keeps CHARTS_DIR, /etc/modules-load.d/k8s.conf and /etc/sysctl.d/99-k8s.conf; it does not purge containerd.io if docker-ce is installed,
+         nor kubernetes-cni (and the Kubernetes apt repo) if kubelet or kubeadm is installed.
 
 22. Remove control-plane taints from control plane nodes:
     Run on host for each control plane node (node1 .. node${NUM_CP}):
